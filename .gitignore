@@ -1,0 +1,13 @@
+tests/build/
+# Optional real-world samples for the host suites. Not committed: one is a
+# chunk of someone else's broadcast, the other a snapshot of their database.
+tests/capture.bin
+tests/real.json
+build/
+*.3dsx
+*.smdh
+*.elf
+*.cia
+*.bnr
+*.banner
+*.map
