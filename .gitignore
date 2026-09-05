@@ -11,3 +11,4 @@ build/
 *.bnr
 *.banner
 *.map
+__pycache__/

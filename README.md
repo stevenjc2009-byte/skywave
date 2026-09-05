@@ -51,7 +51,23 @@ legal way around it.
 
 ## Installing
 
-**CIA (recommended — installs as a real title with a banner):**
+**QR code (no SD card, no computer):**
+
+<img src="qr.png" alt="Install QR code for Skywave v1.0.1" width="220">
+
+Open FBI on the console, choose **Remote Install → Scan QR Code**, and point the
+camera at that. FBI downloads and installs the CIA over WiFi on its own. The code
+encodes the direct asset URL for **v1.0.1**:
+
+```
+https://github.com/stevenjc2009-byte/skywave/releases/download/v1.0.1/skywave1.0.1.cia
+```
+
+Regenerate it after a version bump with `python tools/make_qr.py --verify` — it
+reads the version out of `source/version.h` and decodes the image it just wrote
+to prove the code really scans to that URL.
+
+**CIA (installs as a real title with a banner):**
 
 1. Download `skywave<version>.cia` from
    [Releases](https://github.com/stevenjc2009-byte/skywave/releases/latest).
