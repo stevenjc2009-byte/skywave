@@ -42,26 +42,28 @@ using [DSP1](https://github.com/zoogie/DSP1/releases). It takes about ten
 seconds and only has to be done once, ever — after that every homebrew app on
 the console has sound, not just this one.
 
-Skywave still runs without it. Browsing, search, favourites and — the one that
-matters — the in-app updater all work; only playback is unavailable, and the
-moment you press play it names the missing file. That is deliberate: a console
-that cannot make sound is exactly the console that most needs to be able to
-update itself. This is a hard platform limit, not a missing feature: there is no
-legal way around it.
+Skywave still runs without it. Browsing, search and favourites all work; only
+playback is unavailable, and the moment you press play it names the missing
+file. This is a hard platform limit, not a missing feature: there is no legal
+way around it.
 
 ## Installing
 
 **QR code (no SD card, no computer):**
 
-<img src="qr.png" alt="Install QR code for Skywave v1.0.1" width="220">
+<img src="qr.png" alt="Install QR code for Skywave v1.0.2" width="220">
 
 Open FBI on the console, choose **Remote Install → Scan QR Code**, and point the
 camera at that. FBI downloads and installs the CIA over WiFi on its own. The code
-encodes the direct asset URL for **v1.0.1**:
+encodes the direct asset URL for **v1.0.2**:
 
 ```
-https://github.com/stevenjc2009-byte/skywave/releases/download/v1.0.1/skywave1.0.1.cia
+https://github.com/stevenjc2009-byte/skywave/releases/download/v1.0.2/skywave1.0.2.cia
 ```
+
+This is also how you update: scan the code for the new version and FBI installs
+over the old one, keeping your favourites. See the note on the in-app updater
+below for why that is the recommended route today.
 
 Regenerate it after a version bump with `python tools/make_qr.py --verify` — it
 reads the version out of `source/version.h` and decodes the image it just wrote
@@ -83,6 +85,17 @@ to prove the code really scans to that URL.
 The self-updater installs CIAs, so it only works on the CIA build. Under the
 Homebrew Launcher it will tell you a new version exists and leave the install
 to you.
+
+**The in-app updater cannot reach GitHub from a real console right now**, and
+that is worth stating plainly rather than letting you find out by pressing the
+button. The 3DS's SSL system module tops out at TLS 1.1 ([3dbrew: "the highest
+supported TLS protocol version is v1.1"](https://www.3dbrew.org/wiki/SSL_Services)),
+and GitHub answers a TLS 1.1 handshake with `tlsv1 alert protocol version`
+— measured 2026-09-05 against `github.com`, `api.github.com`,
+`objects.githubusercontent.com` and `release-assets.githubusercontent.com`, all
+four refused. So **Check for updates** will report that it could not reach
+GitHub. Use the QR code above to update until Skywave carries its own TLS stack.
+FBI can install from the same URL because FBI does not use the system module.
 
 ## Controls
 

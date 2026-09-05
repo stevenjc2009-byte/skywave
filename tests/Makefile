@@ -26,7 +26,7 @@ CAP ?= capture.bin
 #   curl "http://de1.api.radio-browser.info/json/stations/search?codec=MP3&hls=0&limit=30&hidebroken=true" -o real.json
 JSON ?= real.json
 
-TESTS := icy ring directory
+TESTS := icy ring directory url
 
 .PHONY: all clean $(TESTS)
 
@@ -46,6 +46,10 @@ ring: $(BUILD)
 directory: $(BUILD)
 	@$(HOSTCC) $(CFLAGS) -o $(BUILD)/test_directory test_directory.c ../source/net/directory_parse.c
 	@./$(BUILD)/test_directory $(JSON)
+
+url: $(BUILD)
+	@$(HOSTCC) $(CFLAGS) -o $(BUILD)/test_url test_url.c ../source/net/url.c
+	@./$(BUILD)/test_url
 
 clean:
 	@rm -rf $(BUILD)

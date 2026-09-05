@@ -2,9 +2,15 @@
 # Builds and runs the host test suites.
 #
 # These cover the parts of Skywave that are pure logic - the Icecast metadata
-# demuxer, the audio ring buffer and the station-directory JSON parser - which
-# are deliberately written without any 3DS header so they can be proven on a PC
-# in a second instead of on hardware.
+# demuxer, the audio ring buffer, the station-directory JSON parser and the URL
+# rewrite behind the https->http retry - which are deliberately written without
+# any 3DS header so they can be proven on a PC in a second instead of on
+# hardware.
+#
+# Every suite added to tests/Makefile must also be added here. test_url spent a
+# release being green in isolation and never once run by this script, which is
+# indistinguishable from not existing: watch the total check count, not the
+# words "ALL SUITES PASSED".
 #
 # Run from anywhere:  bash tools/run_tests.sh [path/to/capture.bin] [path/to/real.json]
 #
@@ -31,6 +37,7 @@ echo "== building =="
 $cc $flags -o "$out/test_icy"       tests/test_icy.c       source/net/icy.c
 $cc $flags -o "$out/test_ring"      tests/test_ring.c      source/audio/ring.c
 $cc $flags -o "$out/test_directory" tests/test_directory.c source/net/directory_parse.c
+$cc $flags -o "$out/test_url"       tests/test_url.c       source/net/url.c
 echo "ok"
 echo
 
@@ -40,6 +47,8 @@ echo
 "./$out/test_icy" "$cap" || rc=$?
 echo
 "./$out/test_directory" "$json" || rc=$?
+echo
+"./$out/test_url" || rc=$?
 
 echo
 if [ "$rc" -eq 0 ]; then

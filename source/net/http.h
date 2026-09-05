@@ -21,9 +21,30 @@
 
 #define SW_URL_MAX 512
 
+// Why an open failed. One generic "could not connect" was a mistake: on a
+// console there is no log to read afterwards, so the message on screen is the
+// entire diagnostic record. These separate the cases that look identical to a
+// user but have completely different answers - a station that is down, a
+// station that wants a password, and a station whose TLS the console cannot
+// speak (which no amount of retrying will fix).
+typedef enum {
+    SW_HTTP_OK = 0,
+    SW_HTTP_ERR_OPEN,       // httpcOpenContext refused the URL itself
+    SW_HTTP_ERR_CONNECT,    // no answer: DNS, refused, or a TLS handshake that died
+    SW_HTTP_ERR_REDIRECT,   // a redirect with no Location, or a loop
+    SW_HTTP_ERR_STATUS,     // the server answered, but not with 200
+} SwHttpResult;
+
 typedef struct {
     httpcContext ctx;
     bool         open;
+
+    // Set on failure and kept, so the caller can say what went wrong rather
+    // than that something did.
+    SwHttpResult err;
+    Result       rc;           // the libctru result behind err, 0 if none
+    u32          status;       // the HTTP status, when one was received
+    bool         tls;          // the hop that failed was https
 
     // Guards `open` and the close, so that a thread calling swHttpCancel can
     // never be cancelling a context another thread has already torn down. It
@@ -46,7 +67,16 @@ typedef struct {
 // sent to a station, and the payload is audio that gets decoded and thrown
 // away. The updater does the opposite - see update.c, where an unverified
 // download would be an unverified executable.
-bool swHttpOpenStream(SwHttp *h, const char *url);
+//
+// Returns SW_HTTP_OK, or the reason it failed - which is also left in `h` for
+// swHttpErrorText.
+SwHttpResult swHttpOpenStream(SwHttp *h, const char *url);
+
+// Writes a one-line explanation of the last failed open into `out`, carrying
+// the real status code or libctru result. The number matters: it is the only
+// thing distinguishing "this station is down today" from "this console will
+// never play this station", and it is the only evidence a user can report.
+void swHttpErrorText(const SwHttp *h, char *out, size_t cap);
 
 // Reads up to `cap` bytes of body. Returns the byte count, 0 if the server has
 // nothing ready this moment (not an error - a stream is paced by the clock),

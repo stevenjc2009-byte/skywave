@@ -140,8 +140,12 @@ static void net_main(void *arg)
 
     g.state = SW_PLAY_CONNECTING;
 
-    if (!swHttpOpenStream(&g.http, g.station.url)) {
-        set_error("Could not connect to this station.");
+    if (swHttpOpenStream(&g.http, g.station.url) != SW_HTTP_OK) {
+        // The specific reason, not a generic one: on a console this line is the
+        // whole diagnostic record, and "could not connect" is unreportable.
+        char why[sizeof(g.error)];
+        swHttpErrorText(&g.http, why, sizeof(why));
+        set_error(why);
         return;
     }
 
