@@ -10,6 +10,12 @@
 
 #include <stdbool.h>
 
+#include "../audio/player.h"
+
 // Runs until the user exits or the console asks the app to close. Assumes the
 // services it needs are already up; see main.c for what those are and why.
-void swAppRun(void);
+//
+// `audio` is whatever swPlayerInit returned. Anything other than SW_PLAYER_OK
+// means the app runs without sound: the station lists, favourites, search and
+// the updater all still work, and pressing play says why it cannot.
+void swAppRun(SwPlayerInitResult audio);

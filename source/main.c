@@ -66,16 +66,13 @@ int main(void)
     // and carried on from rather than stopping the app.
     bool have_am = R_SUCCEEDED(amInit());
 
+    // A failure here does NOT stop the app. It used to, on the reasoning that
+    // sound is the point of a radio - but that reasoning has a hole in it: the
+    // one thing a console without dspfirm.cdc most needs is the in-app updater,
+    // and exiting here puts the updater out of reach along with everything
+    // else. So the reason is carried into the app, which stays fully usable and
+    // says why there is no sound the moment the user asks for any.
     SwPlayerInitResult pr = swPlayerInit();
-    if (pr != SW_PLAYER_OK) {
-        // Sound is the entire point of a radio app, so unlike amInit this is
-        // the end of the road - but the user is told exactly which file is
-        // missing and how to produce it, rather than left with silence.
-        fatal("Sound is unavailable.", swPlayerInitText(pr));
-        if (have_am) amExit();
-        httpcExit();
-        return 0;
-    }
 
     if (!swUiInit()) {
         fatal("The graphics system would not start.", NULL);
@@ -85,7 +82,7 @@ int main(void)
         return 0;
     }
 
-    swAppRun();
+    swAppRun(pr);
 
     // Torn down in the reverse of the order it came up in. The player stops its
     // threads before the graphics go away, because a thread still running when

@@ -46,6 +46,7 @@ typedef struct {
     char message[96];
     bool message_bad;
     bool update_installed;     // a restart is pending; changes the exit path
+    SwPlayerInitResult audio;  // SW_PLAYER_OK, or why there is no sound
 
     char now[256];
     char status[64];
@@ -280,6 +281,14 @@ static void play_index(int i)
     const SwStationList *l = active_list();
     if (!l || i < 0 || i >= l->count) return;
 
+    // Without a working DSP there is nothing to play into, and swPlayerPlay
+    // would refuse with a generic message. Say the actual reason instead - it
+    // is the one failure here a user can do something about.
+    if (g.audio != SW_PLAYER_OK) {
+        say(true, "%s", swPlayerInitTextShort(g.audio));
+        return;
+    }
+
     if (!swPlayerPlay(&l->items[i]))
         say(true, "%s", swPlayerError()[0] ? swPlayerError() : "Could not start playback.");
     else
@@ -395,12 +404,20 @@ static void refresh_top_screen(void)
 
 // ------------------------------------------------------------------ the loop
 
-void swAppRun(void)
+void swAppRun(SwPlayerInitResult audio)
 {
     memset(&g, 0, sizeof(g));
+    g.audio = audio;
 
     swDirInit();
     swFavLoad();
+
+    // Said once, up front, rather than only when the user presses A on a
+    // station and nothing happens. The app is still fully usable without sound -
+    // including the updater, which is how a console in this state gets a build
+    // that works.
+    if (g.audio != SW_PLAYER_OK)
+        say(true, "%s", swPlayerInitTextShort(g.audio));
 
     // Open on saved stations when there are any. Someone who has been here
     // before almost always wants one of their own stations, and showing them

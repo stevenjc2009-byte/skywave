@@ -20,6 +20,12 @@
 // the user with DSP1. There is no way around this and no way to ship it. If it
 // is missing, swPlayerInit fails with SW_PLAYER_NO_DSPFIRM and the app must say
 // so in words - an app that silently plays nothing is an app that looks broken.
+//
+// A failed init is NOT a reason to refuse to run. Every function here is safe to
+// call afterwards; play simply returns false. The app stays up so that browsing,
+// searching, favourites and - the one that actually matters - the in-app updater
+// all still work. Exiting instead would mean a console without the DSP dump could
+// never update to a build that fixed anything.
 
 #include <stdbool.h>
 
@@ -44,8 +50,11 @@ typedef enum {
 SwPlayerInitResult swPlayerInit(void);
 void               swPlayerExit(void);
 
-// Human-readable text for a failed init, for putting on screen.
+// Human-readable text for a failed init, for putting on screen. The long form
+// is several lines and is meant for a whole screen; the short form is one line
+// and fits the status strip the rest of the app talks through.
 const char *swPlayerInitText(SwPlayerInitResult r);
+const char *swPlayerInitTextShort(SwPlayerInitResult r);
 
 // Begins playing a station. Returns immediately - connecting happens on the
 // network thread, so the UI never freezes on a station that is slow to answer.

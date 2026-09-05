@@ -42,9 +42,12 @@ using [DSP1](https://github.com/zoogie/DSP1/releases). It takes about ten
 seconds and only has to be done once, ever — after that every homebrew app on
 the console has sound, not just this one.
 
-Skywave will start without it, so you can browse and search, but the moment you
-press play it will tell you the file is missing and name it. This is a hard
-platform limit, not a missing feature: there is no legal way around it.
+Skywave still runs without it. Browsing, search, favourites and — the one that
+matters — the in-app updater all work; only playback is unavailable, and the
+moment you press play it names the missing file. That is deliberate: a console
+that cannot make sound is exactly the console that most needs to be able to
+update itself. This is a hard platform limit, not a missing feature: there is no
+legal way around it.
 
 ## Installing
 

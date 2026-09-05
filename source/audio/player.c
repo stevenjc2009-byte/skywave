@@ -332,6 +332,18 @@ const char *swPlayerInitText(SwPlayerInitResult r)
     return "Sound is unavailable.";
 }
 
+const char *swPlayerInitTextShort(SwPlayerInitResult r)
+{
+    switch (r) {
+        case SW_PLAYER_OK: return "";
+        case SW_PLAYER_NO_DSPFIRM:
+            return "No sound: sdmc:/3ds/dspfirm.cdc is missing. Run DSP1 once.";
+        case SW_PLAYER_NO_NDSP:   return "No sound: the sound service would not start.";
+        case SW_PLAYER_NO_MEMORY: return "No sound: not enough memory for audio buffers.";
+    }
+    return "No sound.";
+}
+
 static bool dspfirm_present(void)
 {
     struct stat sb;
