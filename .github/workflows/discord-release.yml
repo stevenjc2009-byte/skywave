@@ -1,0 +1,317 @@
+name: Announce release on Discord
+
+# Posts a published release into a Discord channel: the version, a short
+# plain-English changelog, the .cia download and the install QR code.
+#
+# PORTABLE. The same file runs unmodified across every 3DS project — blocksmith,
+# dirt2-3ds, skywave, apsis and model-game — because nothing about the layout is
+# hardcoded. Measured 2026-09-07, the four repos disagree about all of it:
+#
+#     repo         .cia asset          QR
+#     dirt2-3ds    dirt2.cia           meta/qr-v1.0.2.png   (in the repo)
+#     skywave      skywave1.0.2.cia    qr.png               (release asset)
+#     apsis        apsis.cia           apsis-1.4.0-qr.png   (release asset)
+#     model-game   modelkit0.4.7.cia   docs/install-qr.png  (in the repo)
+#     blocksmith   blocksmith1.9.0.cia docs/install-qr.png  (in the repo)
+#
+# So the .cia and the QR are DISCOVERED, not constructed. Assets are matched on
+# their real `.name` from the API: `gh release create file#label` sets a display
+# label rather than the filename, so a hand-built URL can 404 while the release
+# page looks perfectly correct.
+#
+# To adopt this in a new repo: drop the file in, set PROJECT below, and add the
+# DISCORD_RELEASE_WEBHOOK secret. Nothing else.
+#
+# The release body is untrusted text. It is never interpolated into a shell
+# command via ${{ }} — it is fetched to a file and read by Python.
+
+env:
+  # Display name used in the announcement. Only per-repo edit in this file.
+  PROJECT: Skywave
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to announce, e.g. v1.8.20"
+        required: true
+        type: string
+      dry_run:
+        description: "Build the payload and print it, do not post to Discord"
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: discord-announce-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  announce:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          set -euo pipefail
+          gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" > release.json
+          echo "Fetched $(jq -r '.tag_name' release.json), body $(jq -r '.body | length' release.json) chars, assets:"
+          jq -r '.assets[].name' release.json
+
+      - name: Post to Discord
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_RELEASE_WEBHOOK }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, re, sys, time, urllib.request, urllib.error
+
+          DRY = os.environ.get("DRY_RUN", "false").lower() == "true"
+          HOOK = os.environ.get("DISCORD_WEBHOOK_URL", "")
+          if not HOOK and not DRY:
+              sys.exit("DISCORD_RELEASE_WEBHOOK secret is empty or missing.")
+
+          # Explicit encoding: release notes carry em dashes and arrows, and a runner
+          # whose default encoding is not UTF-8 would throw on them.
+          rel = json.load(open("release.json", encoding="utf-8"))
+
+          project = os.environ.get("PROJECT") or os.environ["GITHUB_REPOSITORY"].split("/")[-1]
+
+          tag   = rel["tag_name"]                 # v1.9.0
+          ver   = tag[1:] if tag.startswith("v") else tag   # 1.9.0
+          name  = rel.get("name") or f"{project} {tag}"
+          link  = rel["html_url"]
+          body  = (rel.get("body") or "").replace("\r\n", "\n").strip()
+          pre   = rel.get("prerelease", False)
+
+          # Assets by their REAL name from the API, never a constructed URL. Names are
+          # DISCOVERED by pattern because the projects disagree: dirt2.cia carries no
+          # version, blocksmith1.9.0.cia does, and the QR is a release asset in some
+          # repos and a file in the tree in others.
+          assets = {a["name"]: a["browser_download_url"] for a in rel.get("assets", [])}
+
+          def pick(pred):
+              """Prefer a name carrying this version, else the first match."""
+              hits = [n for n in sorted(assets) if pred(n.lower())]
+              return next((n for n in hits if ver in n), hits[0]) if hits else None
+
+          cia_name = pick(lambda n: n.endswith(".cia"))
+          cia      = assets.get(cia_name) if cia_name else None
+          news_name = pick(lambda n: n.startswith("whatsnew") and n.endswith(".txt"))
+          news      = assets.get(news_name) if news_name else None
+
+          CHUNK      = 3900   # headroom under Discord's 4096 embed-description limit
+          MAX_CHUNKS = 5      # 5 x 3900 = 19,500 chars; the largest body so far is 12,405
+          COLOUR     = 0x6AA84F
+          PAUSE      = 1.0    # seconds between messages, to stay clear of the webhook rate limit
+
+          # Sections dropped from the Discord post. The full text stays on the GitHub
+          # release page — this only trims what gets mirrored into the channel, to the
+          # three groups steve asked for: what was added, changed and fixed.
+          #
+          # Heading styles vary a lot across this repo's releases: some use Keep-a-Changelog
+          # sections (### Added / ### Fixed / ### Changed), others use prose headings
+          # (## Sound (was v1.8.19)). So this is a blocklist, not a whitelist — a whitelist
+          # of Added/Changed/Fixed would delete almost all of v1.8.20.
+          DROP = re.compile(
+              r"^\s*(compatibility"
+              r"|not[- ]verified"
+              r"|verified"
+              r"|verification"
+              r"|how (this build|it) was verified)\s*$",
+              re.I,
+          )
+
+          def strip_sections(text):
+              """Drop blocklisted headed sections, including any nested subheadings."""
+              out, drop_level = [], None
+              for line in text.split("\n"):
+                  m = re.match(r"^(#{1,6})\s+(.*?)\s*$", line)
+                  if m:
+                      level, title = len(m.group(1)), m.group(2)
+                      if drop_level is not None and level <= drop_level:
+                          drop_level = None          # this heading ends the dropped section
+                      if drop_level is None and DROP.match(title):
+                          drop_level = level
+                          continue
+                  if drop_level is None:
+                      out.append(line)
+              return re.sub(r"\n{3,}", "\n\n", "\n".join(out)).strip()
+
+          def split(text, limit=CHUNK):
+              """Split on line boundaries, keeping ``` fences balanced across chunks."""
+              parts, buf, size, fence = [], [], 0, False
+              lines = []
+              for line in text.split("\n"):
+                  # A single line longer than the limit has no boundary to split on,
+                  # so cut it by characters. Real bodies top out around 660 chars per
+                  # line; this only guards a pathological one.
+                  while len(line) + 1 > limit:
+                      lines.append(line[:limit - 1])
+                      line = line[limit - 1:]
+                  lines.append(line)
+              for line in lines:
+                  if buf and size + len(line) + 1 > limit:
+                      chunk = "\n".join(buf) + ("\n```" if fence else "")
+                      parts.append(chunk)
+                      buf, size = (["```"], 4) if fence else ([], 0)
+                  buf.append(line)
+                  size += len(line) + 1
+                  if line.lstrip().startswith("```"):
+                      fence = not fence
+              # Strip only blank lines: a chunk boundary can land on an indented
+              # continuation line, and .strip() would eat its markdown indent.
+              tail = "\n".join(buf).strip("\n")
+              if tail.strip():
+                  parts.append(tail)
+              return parts or ["_This release has no notes._"]
+
+          def parse_whatsnew(text):
+              """Render the player-facing whatsnew<ver>.txt as Discord sections.
+
+              That file's format: '#' comment lines, then [features] / [fixes] headers
+              with one plain-English item per line, a leading '- ' optional. Section
+              order is taken from the file, not reordered — some releases lead with
+              fixes. An unrecognised [section] is title-cased rather than dropped.
+              """
+              labels = {"features": "Added", "fixes": "Fixed", "changes": "Changed"}
+              order, items, cur = [], {}, None
+              for raw in text.split("\n"):
+                  line = raw.strip()
+                  if not line or line.startswith("#"):
+                      continue
+                  m = re.match(r"^\[(.+?)\]$", line)
+                  if m:
+                      cur = m.group(1).lower()
+                      if cur not in items:
+                          order.append(cur)
+                          items[cur] = []
+                      continue
+                  if cur:
+                      items[cur].append(re.sub(r"^-\s*", "", line))
+              out = []
+              for k in order:
+                  if items[k]:
+                      out.append(f"### {labels.get(k, k.title())}")
+                      out += [f"- {i}" for i in items[k]]
+                      out.append("")
+              return "\n".join(out).strip()
+
+          # Prefer the short player-facing notes. The GitHub release body is written for
+          # developers and runs to 12,000 characters; whatsnew<ver>.txt is the same
+          # release said in plain English for a player, and every release from v1.6.0
+          # carries one. Fall back to the trimmed release body when it is absent.
+          trimmed = ""
+          if news:
+              try:
+                  with urllib.request.urlopen(news, timeout=20) as r:
+                      trimmed = parse_whatsnew(r.read().decode("utf-8", "replace"))
+                  print(f"using {news_name} -> {len(trimmed)} chars")
+              except Exception as e:
+                  print(f"could not read {news_name} ({e}); falling back to the release body")
+          if not trimmed:
+              trimmed = strip_sections(body)
+              print(f"using the release body, sections trimmed: {len(body)} -> {len(trimmed)} chars")
+
+          parts = split(trimmed)
+          truncated = len(parts) > MAX_CHUNKS
+          parts = parts[:MAX_CHUNKS]
+
+          # Install QR. A release ASSET wins when there is one (skywave ships qr.png,
+          # apsis ships apsis-1.4.0-qr.png), because that is pinned to the release.
+          # Otherwise look in the repo tree AT THIS TAG, so the QR always matches the
+          # version being announced rather than whatever is on the default branch.
+          # Verified 2026-09-07 on blocksmith v1.8.20: the tree PNG at that tag decodes,
+          # under two independent decoders, to that version's own .cia URL.
+          repo = os.environ["GITHUB_REPOSITORY"]
+          qr = assets.get(pick(lambda n: "qr" in n and n.endswith((".png", ".jpg"))) or "")
+          if not qr:
+              raw = f"https://raw.githubusercontent.com/{repo}/{tag}"
+              for path in (f"meta/qr-{tag}.png", "docs/install-qr.png", "gfx/qr.png",
+                           "qr.png", "meta/qr-latest.png"):
+                  cand = f"{raw}/{path}"
+                  try:
+                      with urllib.request.urlopen(urllib.request.Request(cand, method="HEAD"), timeout=15) as r:
+                          if r.status == 200:
+                              qr = cand
+                              break
+                  except Exception:
+                      continue
+          print(f"qr: {qr or 'none found'}")
+
+          fields = []
+          if cia:
+              fields.append({"name": "Download (CIA)", "value": f"[{cia_name}]({cia})", "inline": True})
+          if news:
+              fields.append({"name": "In-game notes",  "value": f"[{news_name}]({news})",  "inline": True})
+          if not cia:
+              fields.append({"name": "Download (CIA)",
+                             "value": "No .cia asset on this release.", "inline": True})
+
+          title = f"{name}{' (pre-release)' if pre else ''}"[:256]
+
+          # Only the FIRST message pings, and only that one carries parse:["everyone"].
+          # The continuation messages keep parse:[] so a 5-part release notifies once,
+          # not five times.
+          first = {
+              "title": title,
+              "url": link,
+              "description": parts[0],
+              "color": COLOUR,
+              "fields": fields,
+              "footer": {"text": f"{project} for Nintendo 3DS · {tag}"},
+              "timestamp": rel.get("published_at"),
+          }
+          if qr:
+              first["image"] = {"url": qr}
+
+          messages = []
+          messages.append({
+              "content": f"@everyone New {project} release: **{tag}**\n{link}",
+              "allowed_mentions": {"parse": ["everyone"]},
+              "embeds": [first],
+          })
+          for i, part in enumerate(parts[1:], start=2):
+              desc = part
+              if truncated and i == len(parts):
+                  desc += f"\n\n… notes truncated. Full release notes: {link}"
+              messages.append({
+                  "allowed_mentions": {"parse": []},
+                  "embeds": [{
+                      "description": desc,
+                      "color": COLOUR,
+                      "footer": {"text": f"{tag} — continued ({i}/{len(parts)})"},
+                  }],
+              })
+
+          print(f"{tag}: {len(body)} chars of notes -> {len(parts)} message(s), truncated={truncated}")
+
+          for n, msg in enumerate(messages, start=1):
+              if DRY:
+                  print(f"--- message {n}/{len(messages)} (dry run) ---")
+                  print(json.dumps(msg, indent=2)[:4000])
+                  continue
+              data = json.dumps(msg).encode("utf-8")
+              req = urllib.request.Request(
+                  HOOK + ("&" if "?" in HOOK else "?") + "wait=true",
+                  data=data,
+                  headers={"Content-Type": "application/json",
+                           "User-Agent": "release-announcer"},
+                  method="POST",
+              )
+              try:
+                  with urllib.request.urlopen(req, timeout=30) as r:
+                      print(f"message {n}/{len(messages)}: HTTP {r.status}")
+              except urllib.error.HTTPError as e:
+                  # Discord returns a JSON explanation on 400 — print it, do not swallow it.
+                  sys.exit(f"message {n}/{len(messages)} failed: HTTP {e.code} {e.read().decode('utf-8', 'replace')}")
+              time.sleep(PAUSE)
+          PY
