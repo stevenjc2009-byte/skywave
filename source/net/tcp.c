@@ -20,6 +20,8 @@
 // helpers are used - the 3DS BIO is hand-written against soc:U.
 #include <mbedtls/net_sockets.h>
 
+#include "../store/diag.h"
+
 // devkitPro's examples all use these two values. The buffer must be aligned and
 // is not part of the app's own heap accounting, so there is nothing to gain by
 // shaving it.
@@ -612,7 +614,16 @@ static SwConnResult tcp_connect(SwConn *c, const char *host, const char *port)
 
     for (struct addrinfo *ai = res; ai; ai = ai->ai_next) {
         int fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-        if (fd < 0) continue;
+        if (fd < 0) {
+            // Recorded because this failure is otherwise invisible. If every
+            // address fails here, `out` is still the initialised
+            // SW_CONN_ERR_CONNECT and last_error is still 0, so a soc:U handle
+            // or buffer exhaustion reaches the user as "Could not reach this
+            // station. (0)" - indistinguishable from a station that is simply
+            // down. The errno is the only thing that tells them apart.
+            swDiagf("socket() failed for %s:%s, errno=%d", host, port, errno);
+            continue;
+        }
 
         // Checked, unlike almost any other F_SETFL call, because everything
         // this function does to avoid hanging depends on it having worked. If
@@ -659,8 +670,12 @@ static SwConnResult tcp_connect(SwConn *c, const char *host, const char *port)
     return out;
 }
 
-SwConnResult swConnOpen(SwConn *c, const char *host, const char *port,
-                        bool tls, bool verify)
+// The body of swConnOpen. Split out so the public entry point below can record
+// one line per attempt from a single place, rather than needing a swDiagf at
+// each of this function's nine exits - nine chances to put one on the wrong
+// branch, or to miss one entirely.
+static SwConnResult conn_open(SwConn *c, const char *host, const char *port,
+                              bool tls, bool verify)
 {
     if (!c || !host || !port) return SW_CONN_ERR_INTERNAL;
 
@@ -760,6 +775,23 @@ tls_failed:
     mbedtls_ssl_config_free(&c->conf);
     if (c->fd >= 0) { close(c->fd); c->fd = -1; }
     return SW_CONN_ERR_TLS;
+}
+
+SwConnResult swConnOpen(SwConn *c, const char *host, const char *port,
+                        bool tls, bool verify)
+{
+    SwConnResult r = conn_open(c, host, port, tls, verify);
+
+    // One line per connection attempt, carrying the three things that cannot be
+    // recovered from a screenshot afterwards: which host, whether the TLS path
+    // was entered at all, and the numeric reason. The directory fetch is always
+    // plain HTTP and a station stream may be either, so "tls=" is what
+    // distinguishes the two in a log.
+    swDiagf("conn %s:%s tls=%d verify=%d -> result=%d last_error=%d",
+            host ? host : "(null)", port ? port : "(null)",
+            (int)tls, (int)verify, (int)r, c ? c->last_error : 0);
+
+    return r;
 }
 
 int swConnLastError(const SwConn *c)

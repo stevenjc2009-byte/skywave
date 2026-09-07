@@ -33,12 +33,32 @@ typedef struct SwHttp SwHttp;
 
 // Sized from a real response: the longest name across a 30-station sample was
 // 56 bytes and the longest resolved URL 280, so these have room without being
-// wasteful. 40 stations at ~470 bytes each is under 19 KB.
+// wasteful. One station is 476 bytes.
+//
+// SW_STATIONS_MAX was 40 up to v1.0.3, and it is a HARD cap: the parse loop in
+// directory_parse.c stops copying at it however many stations the server sent.
+// Because the codec filter runs AFTER the server has applied its own limit=,
+// asking for 40 and then dropping the unplayable ones could only ever show
+// fewer than 40 - measured 38 on hardware, and 31 of 40 on the GB sample. The
+// query now asks for exactly this many (it is stringified straight into
+// QUERY_TAIL), so this is the size of the answer we are willing to hold rather
+// than the size of the list a user ends up seeing.
+//
+// 120 x 476 = 57 KB per list. Three lists live in the app's static state
+// (browse, results, job_out), so this costs ~167 KB of BSS against ~56 KB at
+// 40 - trivial on a 3DS - and lands 80-90 playable stations after filtering at
+// the measured 77.5% retention.
+//
+// Three other constants are coupled to this one and must move with it, or the
+// change either does nothing or breaks the fetch outright:
+//   ui.h              UI_MAX_ROWS - a second, independent cap on rows drawn
+//   directory.c       JSON_BUF    - a truncated body fails to parse entirely
+//   directory_parse.c TOKENS_MAX  - jsmn abandons the parse, it does not truncate
 #define SW_STATION_NAME 72
 #define SW_STATION_URL  320
 #define SW_STATION_UUID 40
 #define SW_STATION_CC   40
-#define SW_STATIONS_MAX 40
+#define SW_STATIONS_MAX 120
 
 // The largest bitrate worth believing. The directory is community-editable and
 // its numeric fields are not validated at the source, so `bitrate` is hostile

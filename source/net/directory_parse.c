@@ -17,8 +17,14 @@
 #include "../../deps/jsmn.h"
 
 // A 40-station response measured ~48 KB and about 70 tokens per station.
-// 6144 leaves a wide margin for the directory growing new fields.
-#define TOKENS_MAX 6144
+//
+// This is not a soft budget: jsmn returns JSMN_ERROR_NOMEM and abandons the
+// WHOLE parse the moment it runs out of slots, so an undersized TOKENS_MAX
+// turns a big response into SW_DIR_ERR_PARSE - no stations at all, rather than
+// the first N. At the measured ~70 tokens per station, the 120 stations this
+// now asks for need ~8,400, which the old 6144 would have failed outright.
+// 16384 keeps roughly the same 2x margin the original had at 40 stations.
+#define TOKENS_MAX 16384
 
 const char *swDirErrorText(SwDirResult r)
 {
@@ -95,7 +101,21 @@ void swDirUrlEncode(const char *in, char *out, size_t cap)
 // screen - the decoder was finished, linked, and unreachable. The rule it
 // enforced has not been dropped, only moved to where it can express both: see
 // codec_playable() below, which also carries the measurements.
-#define QUERY_TAIL "hls=0&hidebroken=true&order=clickcount&reverse=true&limit=40"
+//
+// limit= was 40 and is now 120. The filter below runs on the CLIENT, after the
+// server has already truncated to limit=, so every station it drops is a row
+// that can never come back - which is why v1.0.3 showed 38 rather than 40. The
+// query now asks for SW_STATIONS_MAX so the filter has spare rows to eat: at
+// the measured GB retention of 31/40 (77.5%), 120 requested lands ~93 shown.
+//
+// The number is STRINGIFIED from SW_STATIONS_MAX rather than written out, so
+// the two cannot drift apart: asking for more than the parser will store wastes
+// bandwidth and tokens, and asking for fewer caps the list below its own array.
+// See directory.h for the other constants coupled to this one.
+#define SW_STR2(x) #x
+#define SW_STR(x)  SW_STR2(x)
+#define QUERY_TAIL \
+    "hls=0&hidebroken=true&order=clickcount&reverse=true&limit=" SW_STR(SW_STATIONS_MAX)
 
 // Why a built-in list rather than the directory's /json/countries endpoint.
 //
@@ -457,9 +477,19 @@ static int skip(const jsmntok_t *tok, int i)
 //   name=jazz      : MP3 29, AAC 6, AAC+ 4, OGG 1
 //
 // So the old query was showing 19 of 40 UK stations and hiding 12 the app can
-// now play. Filtering here instead costs one OGG station's worth of wasted row
-// in 80 measured - the response is 52,800 bytes against a 98,304-byte buffer,
-// so limit=40 did not need raising to compensate.
+// now play.
+//
+// CORRECTED 2026-09-07, v1.0.4. This comment used to end: "Filtering here
+// instead costs one OGG station's worth of wasted row in 80 measured - the
+// response is 52,800 bytes against a 98,304-byte buffer, so limit=40 did not
+// need raising to compensate." That was wrong, and wrong in a way worth
+// recording: it measured the BUFFER and concluded about the ROW COUNT. Those
+// are different quantities. limit= is applied by the SERVER; this filter runs
+// on the CLIENT afterwards, so every row it drops is a row that cannot come
+// back, and the list can only ever be shorter than limit=. The GB numbers above
+// say so directly - 31 of 40 survive - and the shipped v1.0.3 showed 38.
+// The query now asks for SW_STATIONS_MAX (120) so the filter has spare rows to
+// consume. See directory.h for the constants this is coupled to.
 //
 // What is accepted:
 //   MP3            - mpg123.

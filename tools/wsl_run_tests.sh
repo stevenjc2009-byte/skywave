@@ -12,10 +12,14 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 
 UA="Skywave/1.0.0 (Nintendo 3DS)"
 
+# Shaped like the query the app actually sends, which matters twice over: the
+# `codec=MP3` pin was removed in v1.0.3 (the API takes one codec value and it was
+# hiding every AAC station), and limit= went 40 -> 120 in v1.0.4. A sample fetched
+# with the old shape exercises the parser against data the app will never see.
 if [ ! -s tests/real.json ]; then
     echo "fetching a directory response..."
     curl -s -A "$UA" \
-      "http://de1.api.radio-browser.info/json/stations/search?codec=MP3&hls=0&hidebroken=true&order=clickcount&reverse=true&limit=40" \
+      "http://de1.api.radio-browser.info/json/stations/search?hls=0&hidebroken=true&order=clickcount&reverse=true&limit=120" \
       -o tests/real.json || true
 fi
 

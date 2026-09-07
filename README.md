@@ -65,14 +65,14 @@ an executable the console will install.
 
 **QR code (no SD card, no computer):**
 
-<img src="qr.png" alt="Install QR code for Skywave v1.0.3" width="220">
+<img src="qr.png" alt="Install QR code for Skywave v1.0.4" width="220">
 
 Open FBI on the console, choose **Remote Install → Scan QR Code**, and point the
 camera at that. FBI downloads and installs the CIA over WiFi on its own. The code
-encodes the direct asset URL for **v1.0.3**:
+encodes the direct asset URL for **v1.0.4**:
 
 ```
-https://github.com/stevenjc2009-byte/skywave/releases/download/v1.0.3/skywave1.0.3.cia
+https://github.com/stevenjc2009-byte/skywave/releases/download/v1.0.4/skywave1.0.4.cia
 ```
 
 This is also how you update: scan the code for the new version and FBI installs

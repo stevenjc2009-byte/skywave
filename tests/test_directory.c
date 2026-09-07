@@ -84,7 +84,16 @@ static void test_url_encode(void)
 // present. The rule moved to codec_playable() in directory_parse.c, where it
 // can name both codecs; test_parse_codec_filter and test_query_does_not_pin_codec
 // are the two halves that now hold it in place.
-#define TAIL "hls=0&hidebroken=true&order=clickcount&reverse=true&limit=40"
+// Spelled out literally rather than derived from SW_STATIONS_MAX, on purpose:
+// these 15 checks are the tripwire for the limit changing. QUERY_TAIL
+// stringifies the constant, so editing SW_STATIONS_MAX silently rewrites every
+// query the app sends, and these going red is the only thing that makes that
+// visible. Deriving the expected value from the same constant would make the
+// test agree with anything and prove nothing.
+//
+// v1.0.3 sent limit=40 and showed 38 rows, because the codec filter runs on the
+// client after the server has already truncated. v1.0.4 asks for 120.
+#define TAIL "hls=0&hidebroken=true&order=clickcount&reverse=true&limit=120"
 #define SEARCH "/json/stations/search?"
 
 static void test_country_list(void)

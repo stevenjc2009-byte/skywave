@@ -14,7 +14,13 @@
 
 #include <stdbool.h>
 
-#define UI_MAX_ROWS   40
+// UI_MAX_ROWS is a SECOND cap, independent of SW_STATIONS_MAX in directory.h.
+// app.c clamps row_count to it when filling the list, so leaving this at 40
+// while the directory held more would have shown 40 rows and silently hidden
+// the rest - the change would have looked like it did nothing. Keep the two in
+// step; the scrolling maths below is written against row_count and does not
+// care how large it is.
+#define UI_MAX_ROWS   120
 #define UI_ROW_TITLE  72
 #define UI_ROW_SUB    72
 

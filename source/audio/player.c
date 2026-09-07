@@ -11,6 +11,7 @@
 #include "aac_bridge.h"
 #include "../net/http.h"
 #include "../net/icy.h"
+#include "../store/diag.h"
 
 // ---------------------------------------------------------------- constants
 
@@ -72,6 +73,8 @@ typedef struct {
                                      // ring by codec sniffing, not yet decoded
     size_t         aac_dry;         // bytes fed to Helix since it last produced
                                      // any PCM at all - see AAC_UNDECODABLE_BYTES
+    size_t         mp3_dry;         // the same patience counter for mpg123 - see
+                                     // MP3_UNDECODABLE_BYTES
 
     // Transport
     SwHttp     http;
@@ -117,6 +120,12 @@ static Player g;
 
 static void set_error(const char *msg)
 {
+    // Every route into SW_PLAY_ERROR goes through here, so this one line
+    // records all of them - and records them even when the message ends up
+    // empty, which is the case that put "Stopped" on screen with nothing under
+    // it and no way to tell what had happened.
+    swDiagf("ERROR: '%s'", msg ? msg : "(null)");
+
     LightLock_Lock(&g.text_lock);
     snprintf(g.error, sizeof(g.error), "%s", msg);
     LightLock_Unlock(&g.text_lock);
@@ -198,11 +207,32 @@ static int bytes_per_frame(void)
 
 // ------------------------------------------------------------ network thread
 
+// How long a station may hold the connection open without ever giving us enough
+// audio to start playing.
+//
+// Added in v1.0.4. Until now the only thing that could end a connected stream
+// was a read error: swHttpRead returning 0 is normal (a stream is paced by the
+// clock, so "nothing ready yet" is the usual answer), so a server that accepted
+// the connection and then trickled - or sent a slow drip that never reached the
+// three-second cushion - buffered forever. No error, no timeout, and no way for
+// a user to tell it apart from their own WiFi being slow. swHttpRead's own
+// BODY_IDLE_MS only fires on a total stall between bytes; this is the
+// cumulative case it cannot see.
+//
+// Measured against the real thing before choosing the number: Capital's 128 kbps
+// MP3 mount delivered 371,947 bytes in 8 seconds from a cold start, because
+// these servers burst a priming buffer before settling into real time. A healthy
+// station therefore clears a 24-65 KB prebuffer in well under a second, and 20
+// seconds is far beyond any honest slow start.
+#define STALL_MS 20000
+
 static void net_main(void *arg)
 {
     (void)arg;
 
     g.state = SW_PLAY_CONNECTING;
+
+    swDiagf("net thread: opening %s", g.station.url);
 
     if (swHttpOpenStream(&g.http, g.station.url) != SW_HTTP_OK) {
         // The specific reason, not a generic one: on a console this line is the
@@ -238,6 +268,9 @@ static void net_main(void *arg)
         return;
     }
 
+    swDiagf("stream open ok: metaint=%d icy-br=%d dir-br=%d",
+            (int)g.http.metaint, g.http.bitrate, g.station.bitrate);
+
     // metaint of 0 means the station sends no metadata, which icyFeed handles
     // as a pure passthrough. Nothing special to do here either way.
     icyInit(&g.demux, g.http.metaint);
@@ -265,8 +298,40 @@ static void net_main(void *arg)
 
     g.state = SW_PLAY_BUFFERING;
 
+    swDiagf("prebuffer=%d bytes, state=BUFFERING", want);
+
+    u64 buffering_since = osGetTime();
+
+    // First-read and first-play markers only. Logged once each per tune-in, not
+    // per iteration - a line per read would be thousands of file writes a
+    // minute and would itself become the reason the stream could not keep up.
+    bool logged_first_read = false;
+    bool logged_playing    = false;
+
     while (g.running) {
+        // Reset the clock whenever audio is actually flowing, so this only ever
+        // measures an unbroken stretch of not-playing. A station that plays and
+        // then rebuffers mid-song gets the full allowance again rather than
+        // inheriting time already spent.
+        if (g.state == SW_PLAY_PLAYING) {
+            buffering_since = osGetTime();
+            if (!logged_playing) {
+                logged_playing = true;
+                swDiagf("state=PLAYING (audio is being sent to the DSP)");
+            }
+        } else if (osGetTime() - buffering_since > STALL_MS) {
+            swDiagf("STALL: %d ms without reaching PLAYING, ring=%u/%d",
+                    STALL_MS, (unsigned)ringUsed(&g.ring), g.prebuffer);
+            set_error("This station is not sending audio fast enough to play.");
+            break;
+        }
+
         int n = swHttpRead(&g.http, g.net_in, NET_CHUNK);
+
+        if (n > 0 && !logged_first_read) {
+            logged_first_read = true;
+            swDiagf("first %d bytes read from the station", n);
+        }
 
         if (n < 0) {
             // Only report it if we are stopping for the station's reasons
@@ -330,6 +395,8 @@ static void net_main(void *arg)
         }
     }
 
+    swDiagf("net thread exiting (running=%d, state=%d)", (int)g.running, (int)g.state);
+
     swHttpClose(&g.http);
 }
 
@@ -356,6 +423,24 @@ static size_t next_chunk(void)
 // is not silently dropped. That substitution is a no-op for every call after
 // the first: next_chunk() falls straight through to the same ringRead() this
 // function used to call itself.
+// The MP3 half of AAC_UNDECODABLE_BYTES, and it exists for the same reason.
+//
+// Added in v1.0.4. fill_aac() got its counter because an AAC stream Helix could
+// not decode would sit on "Buffering..." forever without ever saying why - but
+// mpg123 was left with no equivalent, on the assumption that MP3 is the safe,
+// well-understood path. It is not safe: the codec is SNIFFED (see pick_codec
+// below), and a station the sniffer calls MP3 wrongly - an AAC stream with a
+// misleading first frame, an HLS playlist, an HTML error page served with an
+// audio content-type - lands here and never decodes. mpg123 answers
+// MPG123_NEED_MORE to all of it, which this loop treats as "keep going", so the
+// failure was indistinguishable from a slow connection: downloading forever,
+// decoding nothing, reporting nothing.
+//
+// Same 256 KB as the AAC side and for the same arithmetic: ~16 seconds of a
+// 128 kbps stream, far more than a genuine mid-stream resync needs and far less
+// than a user will sit staring at a progress bar.
+#define MP3_UNDECODABLE_BYTES (256 * 1024)
+
 static size_t fill_mp3(u8 *out, size_t cap)
 {
     size_t done_total = 0;
@@ -388,6 +473,20 @@ static size_t fill_mp3(u8 *out, size_t cap)
         int fr = mpg123_decode(g.mh, g.feed, got, out + done_total,
                                cap - done_total, &ignored);
         done_total += ignored;
+
+        // Patience, measured in input bytes for the same reason as the AAC side:
+        // it is the only unit that scales alike for a 24 kbps stream and a 320
+        // kbps one. `ignored` is this call's PCM output, so progress on either
+        // decode above resets it.
+        if (done > 0 || ignored > 0) {
+            g.mp3_dry = 0;
+        } else {
+            g.mp3_dry += got;
+            if (g.mp3_dry >= MP3_UNDECODABLE_BYTES) {
+                set_error("This station's audio format is not supported.");
+                return done_total;
+            }
+        }
 
         if (fr == MPG123_NEW_FORMAT) {
             long rate; int ch, enc;
@@ -727,7 +826,27 @@ void swPlayerExit(void)
 
 bool swPlayerPlay(const SwStation *st)
 {
-    if (!g.inited || !st || !st->url[0]) return false;
+    // These three used to share one silent `return false`, which made them the
+    // only exit in the entire play path that changed neither the state nor the
+    // error text. The caller's fallback message ("Could not start playback.")
+    // covered it, but named none of the three, and the state stayed STOPPED -
+    // so on a console the whole failure was a screen that did not change. Each
+    // now says which of the three it was, because on hardware this line IS the
+    // diagnostic record; there is nowhere else to look.
+    if (!g.inited) {
+        set_error("Audio was never started, so there is nothing to play into.");
+        return false;
+    }
+    if (!st) {
+        set_error("No station was passed to the player.");
+        return false;
+    }
+    if (!st->url[0]) {
+        set_error("That station has no stream address in the directory.");
+        return false;
+    }
+
+    swDiagf("swPlayerPlay '%s'", st->name);
 
     swPlayerStop();
     clear_text();
@@ -761,6 +880,7 @@ bool swPlayerPlay(const SwStation *st)
     g.codec    = SW_CODEC_UNKNOWN;
     g.feed_len = 0;
     g.aac_dry  = 0;    // patience for the new station, not what the last one used
+    g.mp3_dry  = 0;
 
     for (int i = 0; i < WBUF_COUNT; i++) {
         memset(&g.wbuf[i], 0, sizeof(g.wbuf[i]));
@@ -787,14 +907,20 @@ bool swPlayerPlay(const SwStation *st)
     // rather than to Skywave. Falling back to core 0 costs some headroom but
     // still plays; refusing to play at all because of a scheduling preference
     // would be the wrong trade.
-    if (!g.net_thread)
+    if (!g.net_thread) {
+        swDiagf("net thread would not start on core 1, retrying on core 0");
         g.net_thread = threadCreate(net_main, NULL, 16 * 1024, prio - 1, 0, false);
+    }
 
     if (!g.dec_thread || !g.net_thread) {
+        swDiagf("thread create FAILED: dec=%p net=%p",
+                (void *)g.dec_thread, (void *)g.net_thread);
         swPlayerStop();
         set_error("Could not start playback threads.");
         return false;
     }
+
+    swDiagf("threads up (dec + net), state=CONNECTING");
     return true;
 }
 

@@ -9,6 +9,7 @@
 #include "../net/directory.h"
 #include "../net/http.h"
 #include "../net/tcp.h"
+#include "../store/diag.h"
 #include "../store/favourites.h"
 #include "../store/presets.h"
 #include "../ui/ui.h"
@@ -480,13 +481,34 @@ static bool ask_for_text(char *dst, size_t cap, const char *hint)
 
 static void play_index(int i)
 {
+    // This was a bare `return`, and it was the one silent exit on the whole
+    // press-A path: no state change, no message, so the screen simply did not
+    // react. That is indistinguishable from the button not working, which is
+    // the hardest kind of bug to get a useful report about. Neither branch
+    // should be reachable - the UI only offers rows it was handed - but "should
+    // not be reachable" is exactly the claim worth instrumenting rather than
+    // trusting, and v1.0.4 went looking for a silent failure that presented as
+    // a screen saying "Stopped" with no second line.
     const SwStationList *l = active_list();
-    if (!l || i < 0 || i >= l->count) return;
+    if (!l) {
+        swDiagf("play_index(%d): active_list() is NULL, tab=%d", i, (int)g.ui.tab);
+        say(true, "This tab has no station list to play from.");
+        return;
+    }
+    if (i < 0 || i >= l->count) {
+        swDiagf("play_index(%d): out of range, count=%d", i, l->count);
+        say(true, "Station %d is not in a list of %d.", i + 1, l->count);
+        return;
+    }
+
+    swDiagf("play_index(%d) '%s' bitrate=%d url=%s",
+            i, l->items[i].name, l->items[i].bitrate, l->items[i].url);
 
     // Without a working DSP there is nothing to play into, and swPlayerPlay
     // would refuse with a generic message. Say the actual reason instead - it
     // is the one failure here a user can do something about.
     if (g.audio != SW_PLAYER_OK) {
+        swDiagf("play_index: refused, audio init was %d", (int)g.audio);
         say(true, "%s", swPlayerInitTextShort(g.audio));
         return;
     }

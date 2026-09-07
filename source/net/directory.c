@@ -24,13 +24,19 @@ static const char *kHosts[] = {
 };
 #define HOST_COUNT ((int)(sizeof(kHosts) / sizeof(kHosts[0])))
 
-// A 40-station answer measured about 48 KB. This is roughly double that, so a
-// directory that grows a few more fields per station does not start silently
-// truncating - which would surface as SW_DIR_ERR_PARSE, not as missing rows.
-#define JSON_BUF 98304
+// A 40-station answer measured about 48 KB - two independent samples put the
+// density at 1200-1320 bytes per station. The query now asks for 120
+// (SW_STATIONS_MAX), so a full answer is 144-158 KB and the old 96 KB buffer
+// would have truncated it. Truncation here is NOT graceful degradation: the
+// read loop in http.c stops at cap-1 with no error, the half-finished JSON then
+// fails to parse, and the user gets SW_DIR_ERR_PARSE - no stations at all
+// rather than fewer. 256 KB keeps the same ~1.6x margin over a full response
+// that the original had, and it is a transient malloc freed at the end of the
+// fetch, not static state.
+#define JSON_BUF 262144
 
 // The common query tail - hls=0, hidebroken, the popularity ordering and
-// limit=40 - used to be spelled out here. It now lives in directory_parse.c
+// the limit - used to be spelled out here. It now lives in directory_parse.c
 // next to swDirBuildQuery, which appends it to every query it produces, so that
 // no caller can forget it and so that query construction can be proven on the
 // host. See QUERY_TAIL there.
