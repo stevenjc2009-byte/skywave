@@ -8,6 +8,7 @@
 #include <sys/stat.h>
 
 #include "ring.h"
+#include "aac_bridge.h"
 #include "../net/http.h"
 #include "../net/icy.h"
 
@@ -19,9 +20,9 @@
 // masks rather than divides, which is what makes it lock-free.
 #define RING_BYTES     131072
 
-// What one httpcDownloadData call asks for. Small enough that the stop flag is
-// checked often (a 128 kbps stream delivers this in a quarter of a second) and
-// large enough not to be all syscall overhead.
+// What one swHttpRead call asks for off the socket. Small enough that the stop
+// flag is checked often (a 128 kbps stream delivers this in a quarter of a
+// second) and large enough not to be all syscall overhead.
 #define NET_CHUNK      4096
 
 // Four DSP buffers of 32 KB. At 44.1 kHz stereo that is 0.19 s each, so the DSP
@@ -42,6 +43,16 @@
 
 // ------------------------------------------------------------------- state
 
+// Which decoder the current station's bytes belong to. Decided once per
+// station, the moment the first audio bytes are in hand - see fill()'s
+// comment further down for why that has to be by sniffing rather than at
+// connect time.
+typedef enum {
+    SW_CODEC_UNKNOWN = 0,   // not decided yet; no audio bytes seen yet
+    SW_CODEC_MP3,
+    SW_CODEC_AAC
+} SwCodec;
+
 typedef struct {
     bool  inited;
 
@@ -54,10 +65,24 @@ typedef struct {
 
     // Decoder
     mpg123_handle *mh;
-    u8            *feed;            // ring -> mpg123 staging, heap not stack
+    AacBridge     *ab;              // Helix AAC wrapper - see aac_bridge.h
+    u8            *feed;            // ring -> decoder staging, heap not stack
+    SwCodec        codec;           // which of the two is decoding this station
+    size_t         feed_len;        // leftover bytes already pulled out of the
+                                     // ring by codec sniffing, not yet decoded
+    size_t         aac_dry;         // bytes fed to Helix since it last produced
+                                     // any PCM at all - see AAC_UNDECODABLE_BYTES
 
     // Transport
     SwHttp     http;
+
+    // The register-play ping gets its own handle rather than borrowing g.http,
+    // which is still open and being read when the ping fires, and rather than a
+    // local, because SwHttp is 17,584 bytes and the thread that fires it has a
+    // 16 KB stack (see swDirRegisterPlayH in directory.h). Living here is also
+    // what lets swPlayerStop reach it to cancel it - see net_main.
+    SwHttp     ping;
+
     Ring       ring;
     u8        *ring_mem;
     IcyDemux   demux;
@@ -77,6 +102,10 @@ typedef struct {
     SwStation  station;
     bool       have_station;
 
+    // Both threads write `state`, and one of the values means something the
+    // other must not undo - see advance_state below for the whole story.
+    LightLock  state_lock;
+
     LightLock  text_lock;           // guards `title` and `error`
     char       title[ICY_TITLE_MAX];
     char       error[96];
@@ -91,7 +120,42 @@ static void set_error(const char *msg)
     LightLock_Lock(&g.text_lock);
     snprintf(g.error, sizeof(g.error), "%s", msg);
     LightLock_Unlock(&g.text_lock);
+
+    // Under state_lock so it cannot be lost to the decode thread's own
+    // progression - see advance_state. The text is written first and outside
+    // this lock so that the moment the UI sees SW_PLAY_ERROR the reason is
+    // already there to print.
+    LightLock_Lock(&g.state_lock);
     g.state = SW_PLAY_ERROR;
+    LightLock_Unlock(&g.state_lock);
+}
+
+// Moves `state` from `from` to `to`, and only from `from`. Returns whether it
+// moved.
+//
+// This exists for the decode thread, which walks buffering -> playing ->
+// buffering on its own and knows nothing about the network thread giving up on
+// the station in between. It used to read `state` into a local, then act on
+// that local several calls later - a ringUsed() and an ndspChnIsPlaying() is a
+// wide window on the other core - and write the result back unconditionally. A
+// station that died during that window had its SW_PLAY_ERROR overwritten with
+// "playing" or "buffering": the real reason was sitting in g.error, already
+// written, and the user watched a dead station buffer for ever instead of
+// being told. Reading and writing under one lock makes it a single decision on
+// one value rather than two decisions on two, and set_error takes the same
+// lock, so there is no ordering in which the loser gets to win.
+//
+// An error is terminal for the current station by design. Only swPlayerPlay and
+// swPlayerStop clear it, and both of them run with these threads already gone.
+static bool advance_state(SwPlayState from, SwPlayState to)
+{
+    bool moved = false;
+
+    LightLock_Lock(&g.state_lock);
+    if (g.state == from) { g.state = to; moved = true; }
+    LightLock_Unlock(&g.state_lock);
+
+    return moved;
 }
 
 static void clear_text(void)
@@ -145,6 +209,31 @@ static void net_main(void *arg)
         // whole diagnostic record, and "could not connect" is unreportable.
         char why[sizeof(g.error)];
         swHttpErrorText(&g.http, why, sizeof(why));
+
+        // Close even though the open failed, and BEFORE reporting, because
+        // swHttpClose is the only thing in the codebase that clears
+        // conn.cancelled - open_common deliberately preserves it (a cancel
+        // aimed at the connection about to be opened must not be erased by the
+        // open itself) and swConnOpen carries it across its own memset. So the
+        // flag is sticky by design, and the one place it gets cleared is the
+        // owning thread finishing with the connection. That is exactly here.
+        //
+        // Without this, the flag survives on g.http for the rest of the
+        // session, and g.http is reused for every station. The way it gets set
+        // is ordinary: swPlayerStop calls swHttpCancel(&g.http) to unblock this
+        // thread, which is precisely what a user pressing Stop or Back while
+        // the screen still says "Connecting..." does. That cancel makes the
+        // open fail, this branch runs, and the old `return` left cancelled
+        // true - so the next station's swHttpOpenStream aborted in swConnOpen
+        // before it opened a socket, and so did every station after it. One
+        // stop during a slow connect and playback was dead until the app was
+        // restarted, with an error that names the symptom and not the cause.
+        //
+        // swHttpClose on a handle whose connection is already down is
+        // documented safe and does not touch err/rc/status, which is why the
+        // message is taken above and is still accurate below.
+        swHttpClose(&g.http);
+
         set_error(why);
         return;
     }
@@ -161,6 +250,18 @@ static void net_main(void *arg)
     if (want < PREBUFFER_MIN) want = PREBUFFER_MIN;
     if (want > PREBUFFER_MAX) want = PREBUFFER_MAX;
     g.prebuffer = want;
+
+    // Publish the size before the state that makes the decode thread go and
+    // read it. This is the same discipline ring.c uses around head/tail (its
+    // RING_BARRIER is exactly this __dmb; the macro is private to that file
+    // because it also has to compile away in the host test build, which never
+    // sees player.c) and it is here for exactly the same reason: `volatile`
+    // orders the compiler, not the two physical ARM11s. The decode thread is
+    // on core 0 and this is core 1, so without this it can observe
+    // SW_PLAY_BUFFERING while still holding the old g.prebuffer - the
+    // PREBUFFER_MIN swPlayerPlay left there - and start playing on 24 KB of
+    // cushion instead of the three seconds this just computed.
+    __dmb();
 
     g.state = SW_PLAY_BUFFERING;
 
@@ -202,9 +303,30 @@ static void net_main(void *arg)
         // Tell the directory the station was played, once, and only after it
         // has actually proven it works. Done here rather than at connect time
         // so that a round trip to the API never delays the first sound.
+        //
+        // This is a synchronous HTTP round trip to a mirror that may be slow or
+        // may never answer, made on the very thread swPlayerStop then blocks on
+        // in threadJoin(U64_MAX). Through swDirRegisterPlay - whose handle is
+        // private to itself and reachable by nobody - a stop landing here had
+        // nothing to cancel: the join waited the ping out, and a mirror that
+        // stalled froze the whole app with no way out, not even HOME. So the
+        // ping goes through swDirRegisterPlayH on g.ping, and it is guarded
+        // twice over, because one guard alone is not enough:
+        //
+        //   * g.running immediately before, so a stop already in flight skips
+        //     the ping outright rather than starting one nobody wants. The
+        //     courtesy of a play count is worth nothing next to a stop that
+        //     answers, and this is the common case.
+        //   * swPlayerStop cancels &g.ping alongside &g.http, for the gap
+        //     between that check and the connect. A cancel that arrives before
+        //     the open survives it (swConnOpen keeps a flag that arrived
+        //     first), and one that arrives during unblocks the socket.
         if (!g.registered && ringUsed(&g.ring) >= (size_t)g.prebuffer) {
             g.registered = true;
-            swDirRegisterPlay(g.station.uuid);
+
+            if (!g.running) break;      // stop pending: don't start the ping
+            swDirRegisterPlayH(&g.ping, g.station.uuid);
+            if (!g.running) break;      // stop landed while it was in flight
         }
     }
 
@@ -213,9 +335,28 @@ static void net_main(void *arg)
 
 // ------------------------------------------------------------- decode thread
 
+// Pulls the next chunk of audio bytes to decode: whatever codec-sniffing
+// already pulled out of the ring and hasn't been consumed yet (see `fill`
+// below), or a fresh read off the ring otherwise. Centralised so neither
+// decode path can forget the leftover-from-sniffing case.
+static size_t next_chunk(void)
+{
+    if (g.feed_len) {
+        size_t got = g.feed_len;
+        g.feed_len = 0;
+        return got;
+    }
+    return ringRead(&g.ring, g.feed, FEED_CHUNK);
+}
+
 // Decodes into one DSP buffer until it is full or the ring runs dry.
-// Returns the byte count written.
-static size_t fill(u8 *out, size_t cap)
+// Unchanged from before AAC support existed, other than pulling its input
+// through next_chunk() instead of calling ringRead() directly, so that the
+// one chunk codec-sniffing already consumed from the ring for THIS station
+// is not silently dropped. That substitution is a no-op for every call after
+// the first: next_chunk() falls straight through to the same ringRead() this
+// function used to call itself.
+static size_t fill_mp3(u8 *out, size_t cap)
 {
     size_t done_total = 0;
 
@@ -240,7 +381,7 @@ static size_t fill(u8 *out, size_t cap)
         if (done_total >= cap) return done_total;
 
         // Out of decoded audio: top the decoder up from the ring.
-        size_t got = ringRead(&g.ring, g.feed, FEED_CHUNK);
+        size_t got = next_chunk();
         if (got == 0) return done_total;   // underrun; caller decides what to do
 
         size_t ignored = 0;
@@ -261,12 +402,127 @@ static size_t fill(u8 *out, size_t cap)
     }
 }
 
+// AAC equivalent of fill_mp3(), same buffer-filling contract, built on top of
+// aac_bridge.h instead of mpg123. The two decoders announce a format change
+// differently (see aac_bridge.h's header comment on why), which is why this
+// cannot just be a branch inside fill_mp3(): every AACDEC_NEW_FORMAT return
+// carries that frame's own PCM already in the new format, so it must be the
+// last thing returned this call rather than something to keep looping past -
+// and aacBridgeHasPending() has to be checked before ever calling
+// aacBridgeDecode() again into the same `out` buffer, or a frame already
+// queued up under a new format would get appended after old-format bytes
+// still sitting earlier in this same wavebuf.
+// How many bytes Helix may swallow without ever handing back a single sample
+// before the stream is declared undecodable rather than merely slow to sync.
+//
+// This loop is NOT unbounded - next_chunk() always consumes from the ring, so
+// fill_aac returns as soon as the ring runs dry - but without this counter an
+// AAC stream Helix cannot decode never produces an error either. dec_main just
+// keeps getting zero bytes back, so the player sits on "Buffering..." forever,
+// downloading the whole time and never saying why. That matters more than
+// usual here because no AAC stream has ever been decoded on real hardware, so
+// an unsupported profile is a live possibility on the first AAC station a user
+// tunes to, and "it just buffers forever" is the least diagnosable way for it
+// to fail.
+//
+// 256 KB is about sixteen seconds of a 128 kbps stream: far more than the few
+// KB a genuine mid-stream resync needs after a dropout, far less than the user
+// spends wondering whether it is their WiFi.
+#define AAC_UNDECODABLE_BYTES (256 * 1024)
+
+static size_t fill_aac(u8 *out, size_t cap)
+{
+    size_t done_total = 0;
+
+    for (;;) {
+        if (done_total >= cap) return done_total;
+
+        // A format change was found and deferred on an earlier iteration of
+        // THIS call (see aac_bridge.h). Stop here and let the very next
+        // fill_aac() call - a fresh wavebuf - pick it up from done_total==0,
+        // the same hard boundary fill_mp3() gets from mpg123 itself.
+        if (done_total && aacBridgeHasPending(g.ab)) return done_total;
+
+        size_t got = next_chunk();
+        if (got == 0 && !aacBridgeHasPending(g.ab)) return done_total;
+
+        size_t done = 0;
+        long rate; int channels;
+        AacDecStatus st = aacBridgeDecode(g.ab, g.feed, got,
+                                          (int16_t *)(out + done_total),
+                                          cap - done_total, &done,
+                                          &rate, &channels);
+
+        if (st == AACDEC_NEW_FORMAT) {
+            set_format(rate, channels);
+            done_total += done;
+            return done_total;
+        }
+        if (st == AACDEC_ERROR) return done_total;   // dead stream; caller decides
+
+        // Progress resets the patience counter; a call that swallowed input and
+        // returned no samples spends it. Measured in input bytes rather than in
+        // iterations or seconds because it is the only one of the three that
+        // scales the same way for a 24 kbps stream and a 320 kbps one.
+        if (done > 0) {
+            g.aac_dry = 0;
+        } else {
+            g.aac_dry += got;
+            if (g.aac_dry >= AAC_UNDECODABLE_BYTES) {
+                set_error("This station's audio format is not supported.");
+                return done_total;
+            }
+        }
+
+        done_total += done;
+        // AACDEC_OK or AACDEC_NEED_MORE: loop and pull more from the ring.
+    }
+}
+
+// Decides which codec this station is and dispatches to the matching fill_*.
+// The decision is made once, the first time this station has any audio bytes
+// to look at, and then remembered in g.codec until the next swPlayerPlay().
+//
+// Detection is by sniffing the bytes themselves (aacBridgeLooksLikeAdts:
+// ADTS's 0xFFF sync with layer bits 00) rather than trusting the HTTP
+// Content-Type header. Icecast/Shoutcast Content-Types for AAC streams are
+// inconsistent in the wild (audio/aac, audio/aacp, application/octet-stream,
+// or simply absent) where MP3's is reliable but sniffing works for both, so
+// one mechanism covers both codecs instead of trusting a header for one and
+// sniffing the other. The two syncs are mutually exclusive by construction
+// (aac_bridge.h), so sniffing can't misclassify an MP3 stream as AAC or vice
+// versa on this bit pattern.
+static size_t fill(u8 *out, size_t cap)
+{
+    if (g.codec == SW_CODEC_UNKNOWN) {
+        size_t got = next_chunk();
+        if (got == 0) return 0;   // nothing to look at yet; try again next call
+
+        g.codec    = aacBridgeLooksLikeAdts(g.feed, got) ? SW_CODEC_AAC : SW_CODEC_MP3;
+        g.feed_len = got;         // don't drop the bytes sniffing just consumed
+    }
+
+    return g.codec == SW_CODEC_AAC ? fill_aac(out, cap) : fill_mp3(out, cap);
+}
+
 static void dec_main(void *arg)
 {
     (void)arg;
 
     while (g.running) {
         SwPlayState st = g.state;
+
+        // The other half of net_main's release-store. It publishes with
+        // `g.prebuffer = want; __dmb(); g.state = SW_PLAY_BUFFERING;` so the
+        // cushion size is in memory before the state that advertises it; this
+        // barrier is what makes reading them in that order mean anything on the
+        // other core. Without it the pair is only half-synchronised, and the
+        // failure would be a stale g.prebuffer from the PREVIOUS station -
+        // audible as a stutter in the first second after switching, and
+        // invisible to every host test, since player.c is compiled by none of
+        // them and RING_BARRIER is a no-op off-console anyway. app.c's
+        // job_finish() already pairs its barriers this way; this did not.
+        __dmb();
 
         if (st == SW_PLAY_ERROR || st == SW_PLAY_CONNECTING) {
             svcSleepThread(20 * 1000 * 1000ULL);
@@ -281,7 +537,12 @@ static void dec_main(void *arg)
                 svcSleepThread(20 * 1000 * 1000ULL);
                 continue;
             }
-            g.state = SW_PLAY_PLAYING;
+            // `st` was read before that ringUsed call, so it is already history
+            // by now; advance_state re-reads and decides in one step. If the
+            // station died while the cushion was filling, the answer is no and
+            // the next pass round the loop picks the error up properly instead
+            // of announcing playback of a stream that has stopped arriving.
+            if (!advance_state(SW_PLAY_BUFFERING, SW_PLAY_PLAYING)) continue;
         }
 
         bool queued_any = false;
@@ -310,10 +571,15 @@ static void dec_main(void *arg)
             // Nothing could be filled. If the ring has genuinely run dry the
             // stream has fallen behind, so drop back to buffering and rebuild
             // the cushion - one gap of silence beats a minute of stuttering.
-            if (g.state == SW_PLAY_PLAYING &&
-                ringUsed(&g.ring) < FEED_CHUNK &&
-                !ndspChnIsPlaying(0)) {
-                g.state = SW_PLAY_BUFFERING;
+            //
+            // The two conditions are read first and the state last, through
+            // advance_state, because a dry ring and a silent channel are also
+            // exactly what a station that has just stopped sending looks like:
+            // testing the state separately and then writing it would put
+            // "buffering" over the network thread's error most of the time this
+            // fires, which is the one moment it must not.
+            if (ringUsed(&g.ring) < FEED_CHUNK && !ndspChnIsPlaying(0)) {
+                advance_state(SW_PLAY_PLAYING, SW_PLAY_BUFFERING);
             }
             svcSleepThread(5 * 1000 * 1000ULL);
         }
@@ -357,6 +623,7 @@ static bool dspfirm_present(void)
 SwPlayerInitResult swPlayerInit(void)
 {
     memset(&g, 0, sizeof(g));
+    LightLock_Init(&g.state_lock);
     LightLock_Init(&g.text_lock);
     g.volume = 80;
 
@@ -366,6 +633,18 @@ SwPlayerInitResult swPlayerInit(void)
     // be locked out of an app that works on them perfectly well.
     if (R_FAILED(ndspInit()))
         return dspfirm_present() ? SW_PLAYER_NO_NDSP : SW_PLAYER_NO_DSPFIRM;
+
+    // Set here, the moment the DSP is genuinely up, rather than at the end of a
+    // successful init. This flag is the only thing swPlayerExit looks at to
+    // decide whether to call ndspExit, and every `goto nomem` below leaves
+    // through swPlayerExit: with it still false at that point a failed init
+    // walked away having started the DSP and never stopped it, with wave
+    // buffers it had just freed still handed to it. It doubles as the app's
+    // "is sound available" flag, but that is not compromised by moving it -
+    // the nomem path clears it again on the way out, so a partial init still
+    // reports itself unavailable rather than half-working, and nothing else
+    // reads it until this function has returned.
+    g.inited = true;
 
     ndspSetOutputMode(NDSP_OUTPUT_STEREO);
     ndspChnReset(0);
@@ -411,8 +690,13 @@ SwPlayerInitResult swPlayerInit(void)
 
     mpg123_open_feed(g.mh);
 
-    g.inited = true;
-    g.state  = SW_PLAY_STOPPED;
+    // Allocated up front alongside mpg123, same reasoning: swPlayerPlay() must
+    // never fail or allocate on the audio path, only reset already-owned
+    // state (aacBridgeReset()) - see aac_bridge.h.
+    g.ab = aacBridgeNew();
+    if (!g.ab) goto nomem;
+
+    g.state = SW_PLAY_STOPPED;
     return SW_PLAYER_OK;
 
 nomem:
@@ -425,6 +709,7 @@ void swPlayerExit(void)
     swPlayerStop();
 
     if (g.mh) { mpg123_close(g.mh); mpg123_delete(g.mh); mpg123_exit(); g.mh = NULL; }
+    if (g.ab) { aacBridgeFree(g.ab); g.ab = NULL; }
 
     for (int i = 0; i < WBUF_COUNT; i++) {
         if (g.wbuf_mem[i]) { linearFree(g.wbuf_mem[i]); g.wbuf_mem[i] = NULL; }
@@ -456,11 +741,26 @@ bool swPlayerPlay(const SwStation *st)
     ringReset(&g.ring);
     icyInit(&g.demux, 0);
 
-    // A fresh feed reader per station. Without this the decoder is still
-    // holding the tail of the previous stream and the first moments of the new
-    // one come out as noise.
+    // Back to the zeroed handle swDirRegisterPlayH is documented to want. The
+    // field that actually matters is the cancel flag: swPlayerStop cancels
+    // g.ping whether or not a ping was ever in flight, and swHttpClose only
+    // clears the flag on a handle that was actually opened, so a stop during a
+    // station that never got as far as registering would leave it set and kill
+    // the next station's ping before it started. Safe to do here and only here:
+    // swPlayerStop above has already joined both threads, so nobody owns it.
+    memset(&g.ping, 0, sizeof(g.ping));
+
+    // A fresh feed reader per station, for both codecs. Without this the
+    // decoder is still holding the tail of the previous stream and the first
+    // moments of the new one come out as noise. Codec is rediscovered from
+    // scratch too - see fill()'s comment - since nothing says the next
+    // station's stream type matches this one's.
     mpg123_close(g.mh);
     mpg123_open_feed(g.mh);
+    aacBridgeReset(g.ab);
+    g.codec    = SW_CODEC_UNKNOWN;
+    g.feed_len = 0;
+    g.aac_dry  = 0;    // patience for the new station, not what the last one used
 
     for (int i = 0; i < WBUF_COUNT; i++) {
         memset(&g.wbuf[i], 0, sizeof(g.wbuf[i]));
@@ -512,6 +812,17 @@ void swPlayerStop(void)
     // get it back; without this, stopping a stalled station hangs the app.
     swHttpCancel(&g.http);
 
+    // The one other place that thread can be blocked for an unbounded time is
+    // the register-play ping, which is a whole HTTP round trip to a directory
+    // mirror - see net_main. Cancelling the stream handle does not reach it,
+    // and the threadJoin below is unbounded, so without this a stop that
+    // happened to land on the ping waited out the mirror rather than the
+    // station: the app froze solid with no way back, HOME included. Safe to
+    // call whether or not a ping is in flight - swHttpCancel on an unopened
+    // handle only sets the flag - and safe before the flag exists to matter,
+    // because a cancel that arrives first survives the open (see swConnOpen).
+    swHttpCancel(&g.ping);
+
     if (g.net_thread) { threadJoin(g.net_thread, U64_MAX); threadFree(g.net_thread); g.net_thread = NULL; }
     if (g.dec_thread) { threadJoin(g.dec_thread, U64_MAX); threadFree(g.dec_thread); g.dec_thread = NULL; }
 
@@ -539,7 +850,17 @@ void swPlayerNowPlaying(char *dst, size_t cap)
     LightLock_Unlock(&g.text_lock);
 }
 
-const char *swPlayerError(void) { return g.error; }
+void swPlayerError(char *dst, size_t cap)
+{
+    if (!cap) return;
+    // Same reason as swPlayerNowPlaying: set_error() writes this from the
+    // network thread under text_lock, and this is called from the main thread
+    // every frame, so a raw pointer would be a torn read on an ordinary event
+    // rather than a rare one.
+    LightLock_Lock(&g.text_lock);
+    snprintf(dst, cap, "%s", g.error);
+    LightLock_Unlock(&g.text_lock);
+}
 
 int swPlayerBufferPercent(void)
 {

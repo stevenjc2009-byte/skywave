@@ -5,7 +5,10 @@
 // The whole list lives in memory - it is at most 40 stations of a few hundred
 // bytes - and is written out in full whenever it changes. Rewriting the file on
 // every edit rather than appending means the on-disk copy is never a partial
-// picture, which matters on a handheld that gets closed mid-thought.
+// picture, which matters on a handheld that gets closed mid-thought. The write
+// itself goes to a temp file that is renamed over the real one, so a crash or
+// a pulled battery mid-write leaves either the old copy or the new one intact
+// - never a truncated mix of both.
 //
 // The format is one tab-separated line per station, on purpose. It survives
 // being opened in a text editor, it survives this struct gaining a field, and a
@@ -26,8 +29,12 @@ const SwStationList *swFavList(void);
 // for, this URL) is already saved.
 bool swFavContains(const SwStation *st);
 
-// Adds or removes. Both write the file immediately and return true if the list
-// changed. Adding when the list is full returns false.
+// Adds or removes. Both write the file immediately and return true only if
+// the list changed AND that change reached the SD card. A failed write (a
+// full or missing card, an I/O error) rolls the in-memory change back before
+// returning false, so a caller never shows a station as saved when it isn't
+// - and the list this file holds always matches what is actually on disk.
+// Adding when the list is full returns false.
 bool swFavAdd(const SwStation *st);
 bool swFavRemove(const SwStation *st);
 

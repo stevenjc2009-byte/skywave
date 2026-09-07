@@ -219,7 +219,6 @@ AccessControlInfo:
    - gsp::Gpu
    - gsp::Lcd
    - hid:USER
-   - http:C
    - nwm::EXT
    - nwm::UDS
    - ptm:sysm
@@ -229,7 +228,13 @@ AccessControlInfo:
    - ssl:C
 
 
-# No RomFs: every asset this app draws is generated in code.
+# RomFs holds one file, romfs:/cacert.pem - the certificate authority bundle the
+# in-app updater verifies GitHub against. Nothing the app draws comes from here;
+# every graphic is still generated in code.
+#
+# APP_ROMFS is supplied by the Makefile as an absolute path.
+RomFs:
+  RootPath                : "$(APP_ROMFS)"
 
 SystemControlInfo:
   SaveDataSize: 0KB # Change if the app uses savedata

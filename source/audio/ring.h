@@ -12,7 +12,12 @@
 // reader thread. Under that rule no lock is needed: the writer only ever
 // advances `head`, the reader only ever advances `tail`, and each reads the
 // other's index once per operation. `volatile` keeps the compiler from caching
-// those reads across the loop.
+// those reads across the loop, but that's a compiler-ordering guarantee only -
+// it says nothing about the MPCore memory system. The writer and reader run on
+// different physical cores (network on core 1, decode on core 0), so ring.c
+// backs `volatile` with real __dmb() barriers around every index publish and
+// read; without them the reader could see an advanced `head` before the bytes
+// it promises are actually visible on that core.
 //
 // `cap` must be a power of two so the wrap is a mask rather than a modulo.
 // One byte is always left unused, which is what makes full and empty

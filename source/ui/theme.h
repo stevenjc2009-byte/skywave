@@ -45,3 +45,36 @@
 #define SW_LIST_Y      (SW_TAB_H + SW_HEAD_H)
 #define SW_LIST_H      (SW_SCREEN_H - SW_LIST_Y - SW_FOOTER_H)
 #define SW_ROWS_VISIBLE (SW_LIST_H / SW_ROW_H)
+
+// Added for the visual pass below - a low twin of the background and panel
+// colours for gradients, a soft shadow for depth under the chrome, a dimmer
+// accent for chips/fills, and twelve on-palette hues for the procedural
+// station-monogram tiles. Additive only: nothing above is renamed or removed.
+#define SW_BG_LOW      C2D_Color32(0x07, 0x0C, 0x18, 0xFF)  // ~7 RGB steps below SW_BG
+#define SW_PANEL_LOW   C2D_Color32(0x10, 0x18, 0x2C, 0xFF)  // ~5 RGB steps below SW_PANEL
+#define SW_SHADOW      C2D_Color32(0x00, 0x00, 0x00, 0x50)
+#define SW_SHADOW_0    C2D_Color32(0x00, 0x00, 0x00, 0x00)  // transparent end of a shadow gradient
+#define SW_ACCENT_SOFT C2D_Color32(0xFF, 0xB3, 0x3C, 0x40)
+
+// Same packing C2D_Color32 does, written as a macro because that function is
+// only constexpr when citro2d is compiled as C++. In C it is a static inline,
+// which cannot initialise a file-scope array - the build failed with
+// "initializer element is not constant" on all twelve entries below. The
+// layout is copied straight from c2d/base.h:104.
+#define SW_RGBA(r, g, b, a) \
+    ((u32)(r) | ((u32)(g) << 8) | ((u32)(b) << 16) | ((u32)(a) << 24))
+
+static const u32 SW_TILE[12] = {
+    SW_RGBA(0xC9, 0x5A, 0x5A, 0xFF),  // red
+    SW_RGBA(0xC9, 0x82, 0x46, 0xFF),  // orange
+    SW_RGBA(0xC2, 0xA6, 0x3C, 0xFF),  // gold
+    SW_RGBA(0x96, 0xB4, 0x46, 0xFF),  // lime
+    SW_RGBA(0x4E, 0xA8, 0x5C, 0xFF),  // green
+    SW_RGBA(0x3E, 0xAE, 0x9A, 0xFF),  // teal
+    SW_RGBA(0x3E, 0x9E, 0xC2, 0xFF),  // sky
+    SW_RGBA(0x5A, 0x82, 0xD9, 0xFF),  // blue
+    SW_RGBA(0x82, 0x66, 0xD9, 0xFF),  // violet
+    SW_RGBA(0xB0, 0x5A, 0xC2, 0xFF),  // magenta
+    SW_RGBA(0xC9, 0x5A, 0x8C, 0xFF),  // pink
+    SW_RGBA(0x82, 0x86, 0x96, 0xFF),  // slate (neutral filler)
+};

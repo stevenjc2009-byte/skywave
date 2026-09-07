@@ -16,10 +16,23 @@ BUILD       := build
 # only has to land in one of these to be compiled - but note that means every
 # .c under them is built, tests included. That is why the host tests live in
 # tests/ rather than beside the code they cover.
-SOURCES     := source source/app source/audio source/net source/store \
+SOURCES     := source source/app source/audio source/audio/aac source/net source/store \
                source/ui source/update
 DATA        := data
-INCLUDES    := source
+# source/audio/aac is on the include path so the vendored Helix decoder's own
+# #include "aacXXX.h" (quote-form, resolved by the compiler against the
+# including file's directory first) and player.c's #include "aac/aacdec.h"
+# (angle-path-style relative include) both resolve, and so the two
+# Skywave-authored shim headers in that directory (Arduino.h, pgmspace.h)
+# satisfy Helix's own angle-bracket #include <Arduino.h>/<pgmspace.h> without
+# editing a single byte of the vendored source - see source/audio/aac/README.md.
+INCLUDES    := source source/audio/aac
+# Holds one file: the certificate authority bundle the updater verifies against.
+# It has to be a real file rather than a header baked into the binary because
+# mbedtls parses it from a path, and because a user can drop a newer bundle at
+# sdmc:/config/ssl/cacert.pem without waiting for a Skywave release - which is
+# the point of that convention.
+ROMFS       := romfs
 APP_TITLE   := Skywave
 APP_DESCRIPTION := Internet radio for the Nintendo 3DS
 APP_AUTHOR  := Skywave
@@ -39,7 +52,12 @@ LDFLAGS  = -specs=3dsx.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
 # mpg123 comes from the devkitPro 3ds-mpg123 package and lives in portlibs, not
 # in libctru - hence the second entry in LIBDIRS. Link order matters: mpg123
 # has to come before -lm because it is what pulls the maths in.
-LIBS    := -lmpg123 -lcitro2d -lcitro3d -lctru -lm
+#
+# mbedtls is the app's own TLS, replacing the console's ssl:C for everything
+# except random numbers. The three libraries have to be in this order between
+# themselves, and all three ahead of -lctru: devkitPro's mbedcrypto gets its
+# entropy from sslcGenerateRandomData, which lives in libctru.
+LIBS    := -lmpg123 -lcitro2d -lcitro3d -lmbedtls -lmbedx509 -lmbedcrypto -lctru -lm
 LIBDIRS := $(PORTLIBS) $(CTRULIB)
 
 #---------------------------------------------------------------------------------
@@ -92,6 +110,10 @@ ifeq ($(strip $(NO_SMDH)),)
     export _3DSXFLAGS += --smdh=$(CURDIR)/$(TARGET).smdh
 endif
 
+ifneq ($(strip $(ROMFS)),)
+    export _3DSXFLAGS += --romfs=$(CURDIR)/$(ROMFS)
+endif
+
 MAKEROM    := makerom
 BANNERTOOL := bannertool
 
@@ -111,9 +133,14 @@ $(OUTPUT).banner : cia/banner.png cia/banner.wav
 	@echo banner ...
 	@$(BANNERTOOL) makebanner -i cia/banner.png -a cia/banner.wav -o $@
 
+# APP_ROMFS is substituted into the RSF's RomFs RootPath. It is passed as an
+# absolute path because makerom resolves a relative one against its own working
+# directory, not against the RSF, which is the kind of difference that only
+# shows up as a CIA with no romfs in it and no error anywhere.
 $(OUTPUT).cia : $(OUTPUT).elf $(OUTPUT).smdh $(OUTPUT).banner cia/$(TARGET).rsf
 	@echo $(notdir $@) ...
 	@$(MAKEROM) -f cia -o $@ -elf $(OUTPUT).elf -rsf cia/$(TARGET).rsf \
+		-DAPP_ROMFS=$(CURDIR)/$(ROMFS) \
 		-icon $(OUTPUT).smdh -banner $(OUTPUT).banner -exefslogo -target t
 	@echo built ... $(notdir $@)
 

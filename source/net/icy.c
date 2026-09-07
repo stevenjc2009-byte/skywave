@@ -92,7 +92,12 @@ size_t icyFeed(IcyDemux *d, const uint8_t *in, size_t in_len, uint8_t *out)
                     // Only flag a real change. Servers repeat the same title in
                     // every block, and a UI that redraws on each one flickers.
                     if (strcmp(t, d->title) != 0) {
-                        memcpy(d->title, t, sizeof(t));
+                        // Only up to the terminator. Copying sizeof(t) dragged
+                        // the whole 256-byte stack buffer across, uninitialised
+                        // tail and all - harmless, since both buffers are the
+                        // same size and every reader stops at the NUL, but it
+                        // copies rubbish the destination has no reason to hold.
+                        memcpy(d->title, t, strlen(t) + 1);
                         d->title_changed = true;
                     }
                 }

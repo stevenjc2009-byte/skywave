@@ -10,6 +10,7 @@
 
 #include "app/app.h"
 #include "audio/player.h"
+#include "net/tcp.h"
 #include "ui/ui.h"
 
 // Draws a full-screen apology on the console text output and waits for START.
@@ -52,12 +53,22 @@ int main(void)
     // than somewhere that might run twice.
     APT_SetAppCpuTimeLimit(30);
 
-    // httpc is the whole network layer: the streams, the directory and the
-    // updater all go through it. Nothing else needs a socket, so soc is not
-    // started at all.
-    if (R_FAILED(httpcInit(0))) {
+    // Holds one file: the certificate authority bundle at romfs:/cacert.pem.
+    // Not fatal if it fails - the trust store is also looked for on the SD card,
+    // and streams do not verify at all, so the only thing lost is the updater.
+    bool have_romfs = R_SUCCEEDED(romfsInit());
+
+    // Sockets, the random number generator and TLS. This replaced httpcInit: the
+    // app no longer uses httpc for anything, because ssl:C underneath it is
+    // fixed at TLS 1.1 and most streaming hosts - and every GitHub host - refuse
+    // a handshake in that shape. See net/tcp.h for the full reasoning.
+    //
+    // Still fatal, for the same reason httpcInit was: everything this app does
+    // is over the network.
+    if (!swNetInit()) {
         fatal("The network service would not start.",
               "Try restarting the console.");
+        if (have_romfs) romfsExit();
         return 0;
     }
 
@@ -78,7 +89,8 @@ int main(void)
         fatal("The graphics system would not start.", NULL);
         swPlayerExit();
         if (have_am) amExit();
-        httpcExit();
+        swNetExit();
+        if (have_romfs) romfsExit();
         return 0;
     }
 
@@ -91,7 +103,8 @@ int main(void)
     swUiExit();
     swPlayerExit();
     if (have_am) amExit();
-    httpcExit();
+    swNetExit();
+    if (have_romfs) romfsExit();
 
     return 0;
 }

@@ -47,18 +47,32 @@ playback is unavailable, and the moment you press play it names the missing
 file. This is a hard platform limit, not a missing feature: there is no legal
 way around it.
 
+### The certificate bundle, and why streams don't use it
+
+Skywave ships a RomFS containing one file, `romfs/cacert.pem` — the Mozilla CA
+bundle (121 certificates, 188 KB). A newer bundle can be dropped at
+`sdmc:/config/ssl/cacert.pem` without waiting for a Skywave release — that is
+the Luma3DS/curl/Homebrew-Launcher convention, and it is preferred over the
+bundled copy whenever it exists.
+
+Verification is deliberately asymmetric. Radio **streams** do not check the
+certificate and fall back to plain http if TLS cannot be completed — nothing
+secret is sent to a station, and the payload is public audio. The in-app
+**updater** always verifies and never falls back, because what it downloads is
+an executable the console will install.
+
 ## Installing
 
 **QR code (no SD card, no computer):**
 
-<img src="qr.png" alt="Install QR code for Skywave v1.0.2" width="220">
+<img src="qr.png" alt="Install QR code for Skywave v1.0.3" width="220">
 
 Open FBI on the console, choose **Remote Install → Scan QR Code**, and point the
 camera at that. FBI downloads and installs the CIA over WiFi on its own. The code
-encodes the direct asset URL for **v1.0.2**:
+encodes the direct asset URL for **v1.0.3**:
 
 ```
-https://github.com/stevenjc2009-byte/skywave/releases/download/v1.0.2/skywave1.0.2.cia
+https://github.com/stevenjc2009-byte/skywave/releases/download/v1.0.3/skywave1.0.3.cia
 ```
 
 This is also how you update: scan the code for the new version and FBI installs
@@ -86,16 +100,28 @@ The self-updater installs CIAs, so it only works on the CIA build. Under the
 Homebrew Launcher it will tell you a new version exists and leave the install
 to you.
 
-**The in-app updater cannot reach GitHub from a real console right now**, and
-that is worth stating plainly rather than letting you find out by pressing the
-button. The 3DS's SSL system module tops out at TLS 1.1 ([3dbrew: "the highest
-supported TLS protocol version is v1.1"](https://www.3dbrew.org/wiki/SSL_Services)),
-and GitHub answers a TLS 1.1 handshake with `tlsv1 alert protocol version`
-— measured 2026-09-05 against `github.com`, `api.github.com`,
-`objects.githubusercontent.com` and `release-assets.githubusercontent.com`, all
-four refused. So **Check for updates** will report that it could not reach
-GitHub. Use the QR code above to update until Skywave carries its own TLS stack.
-FBI can install from the same URL because FBI does not use the system module.
+**The in-app updater has not been verified on real hardware.** Until this
+session it went through libctru's `httpc`, which sits on the console's `ssl:C`
+system module — fixed at TLS 1.1 with RSA key exchange and CBC ciphers, with no
+libctru option able to raise it ([3dbrew: "the highest supported TLS protocol
+version is v1.1"](https://www.3dbrew.org/wiki/SSL_Services)). GitHub answers a
+TLS 1.1 handshake with `tlsv1 alert protocol version` — measured 2026-09-05
+against `github.com`, `api.github.com`, `objects.githubusercontent.com` and
+`release-assets.githubusercontent.com`, all four refused. Most https radio
+stations failed the same handshake for the same reason, though there is no
+fixed count to quote for that: the station list is pulled live from
+radio-browser.info rather than shipped in the app, so whatever passed or
+failed on a given day was never a stable number. That is why the in-app
+updater could never work through the system module.
+
+Skywave now opens its own sockets and performs its own TLS with mbedtls 2.28.8
+from devkitPro's portlibs, negotiating TLS 1.2 with ECDHE, and reaches GitHub
+and the https stations that `ssl:C` refused. `ssl:C` is still initialised at
+startup, but only as a random-number source for mbedtls — never for a
+handshake. This has not been compiled or run on a console yet, so treat the
+updater as unverified until that changes: use the QR code above to update in
+the meantime. FBI can install from the same URL either way, because FBI does
+not use the system module.
 
 ## Controls
 
@@ -115,7 +141,7 @@ FBI can install from the same URL because FBI does not use the system module.
 ```
   net thread  ──►  ring buffer  ──►  decoder thread  ──►  DSP
   (core 1)         (128 KB)          (core 0)
-  httpc            lock-free         mpg123            ndsp
+  socket + TLS     lock-free         mpg123            ndsp
   ICY demux        SPSC              feed API          4 × 32 KB wavebufs
 ```
 
@@ -141,7 +167,7 @@ looks exactly like a broken one.
 ```
 source/app/        the run loop, background jobs, tab behaviour
 source/audio/      ndsp + mpg123 player, lock-free ring buffer
-source/net/        httpc wrapper, ICY demuxer, directory client + parser
+source/net/        sockets + mbedtls TLS, HTTP, ICY demuxer, directory client + parser
 source/store/      favourites file
 source/ui/         citro2d drawing and input
 source/update/     GitHub self-update
@@ -153,10 +179,11 @@ cia/               RSF spec, banner art and audio
 
 ## Building
 
-Needs devkitPro with `3ds-dev` and the `3ds-mpg123` portlib:
+Needs devkitPro with `3ds-dev`, the `3ds-mpg123` portlib, and the `3ds-mbedtls`
+portlib (the app's own TLS, replacing the console's `ssl:C` for handshakes):
 
 ```bash
-pacman -S 3ds-dev 3ds-mpg123
+pacman -S 3ds-dev 3ds-mpg123 3ds-mbedtls
 ```
 
 From the **devkitPro MSYS2 shell**:

@@ -4,7 +4,11 @@
 # never depend on the network.
 set -uo pipefail
 
-cd /mnt/c/Users/steve/Documents/3ds-project-folder/skywave
+# Self-locating: tools/ is one level below the project root, so the script
+# works from any working directory and moves with the project. (Was an absolute
+# /mnt/c/Users/... path, which both leaked a username into a public repo and
+# only worked on one machine.)
+cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 
 UA="Skywave/1.0.0 (Nintendo 3DS)"
 

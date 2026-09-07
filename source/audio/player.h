@@ -76,8 +76,12 @@ const SwStation *swPlayerStation(void);
 // another thread.
 void swPlayerNowPlaying(char *dst, size_t cap);
 
-// Why playback stopped, when the state is SW_PLAY_ERROR. "" otherwise.
-const char *swPlayerError(void);
+// Why playback stopped, when the state is SW_PLAY_ERROR. "" otherwise. Copies
+// into the caller's buffer, same reason as swPlayerNowPlaying: set_error()
+// writes `error` under text_lock from the network thread the instant a stream
+// drops, and this is polled every frame from the main thread, so handing back
+// a raw pointer would let the UI read it mid-write.
+void swPlayerError(char *dst, size_t cap);
 
 // How full the ring is, 0..100. This is the honest health indicator: a station
 // that keeps this near full is fine, one that sits near empty is about to
