@@ -634,31 +634,59 @@ static SwConnResult tcp_connect(SwConn *c, const char *host, const char *port)
         // to abandon this address and try the next one from getaddrinfo().
         int flags = fcntl(fd, F_GETFL, 0);
         if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+            // Logged for the same reason the socket() failure above is: this
+            // branch abandons the address silently, and every address failing
+            // here leaves `out` at the initialised SW_CONN_ERR_CONNECT with
+            // last_error 0 - identical on screen and in the log to a host that
+            // simply refused the connection.
+            swDiagf("fcntl(O_NONBLOCK) failed for %s:%s, flags=%d errno=%d",
+                    host, port, flags, errno);
             close(fd);
             continue;
         }
 
         c->fd = fd;
         int rc = connect(fd, ai->ai_addr, ai->ai_addrlen);
+        int connerr = errno;
+
+        // Every hardware report so far ends here: result=2 with last_error=0,
+        // on every host, in a fraction of the 8000 ms CONNECT_TIMEOUT_MS. That
+        // narrows it to this block but no further, because the four ways
+        // through it are indistinguishable once it has returned - connect()
+        // refusing outright with an errno nobody recorded, select() reporting
+        // an error, getsockopt() itself failing, or SO_ERROR coming back
+        // non-zero. They have four different causes. This line separates them.
+        {
+            const struct sockaddr_in *sin = (const struct sockaddr_in *)(const void *)ai->ai_addr;
+            swDiagf("connect %s:%s ip=%s rc=%d errno=%d",
+                    host, port, inet_ntoa(sin->sin_addr), rc, connerr);
+        }
 
         if (rc == 0) { out = SW_CONN_OK; break; }
 
-        if (errno == EINPROGRESS || errno == EWOULDBLOCK || errno == EALREADY) {
+        if (connerr == EINPROGRESS || connerr == EWOULDBLOCK || connerr == EALREADY) {
             int ready = wait_ready(c, true, CONNECT_TIMEOUT_MS);
             if (ready == 1) {
                 // select() says writable for both success and refusal; only
                 // SO_ERROR distinguishes them.
                 int err = 0;
                 socklen_t elen = sizeof(err);
-                if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &elen) == 0 && err == 0) {
+                int grc = getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &elen);
+                swDiagf("  wait_ready=1 getsockopt rc=%d errno=%d so_error=%d",
+                        grc, errno, err);
+                if (grc == 0 && err == 0) {
                     out = SW_CONN_OK;
                     break;
                 }
             } else if (ready < 0) {
+                swDiagf("  wait_ready=%d (cancelled or select error) errno=%d",
+                        ready, errno);
                 out = SW_CONN_ERR_CANCELLED;
                 close(fd);
                 c->fd = -1;
                 break;
+            } else {
+                swDiagf("  wait_ready=0 (timed out after %d ms)", CONNECT_TIMEOUT_MS);
             }
         }
 
