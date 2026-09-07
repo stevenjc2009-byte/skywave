@@ -166,6 +166,10 @@ static void job_start(JobKind kind)
         g.worker = threadCreate(worker_main, NULL, 24 * 1024, prio, 0, false);
 
     if (!g.worker) {
+        // Neither core would take it. Worth a line of its own: on screen this
+        // is one sentence that looks like every other failure, but it means the
+        // fetch never happened at all rather than came back wrong.
+        swDiagf("job %d: threadCreate failed on BOTH cores", (int)kind);
         g.job_running = false;
         g.ui.busy     = false;
         say(true, "Could not start a background task.");
@@ -190,6 +194,20 @@ static void job_finish(void)
     // job_running read that gated calling this function.
     __dmb();
     g.ui.busy = false;
+
+    // Every directory job's outcome, before the branch that decides what to
+    // show. v1.0.4 logged the connection and the play attempt but never what a
+    // fetch actually came back with, so a report of "search finds nothing"
+    // could not be told apart from a parse failure, an empty result set, or a
+    // job that never ran - the three have three different causes and the same
+    // appearance on screen. `result` is SwDirResult: 0 OK, 1 ERR_NET,
+    // 2 ERR_PARSE, 3 EMPTY.
+    if (g.job_kind == JOB_TOP || g.job_kind == JOB_SEARCH)
+        swDiagf("job %s -> result=%d (%s) count=%d",
+                g.job_kind == JOB_TOP ? "TOP" : "SEARCH",
+                (int)g.job_dir_result,
+                swDirErrorText(g.job_dir_result),
+                g.job_out.count);
 
     switch (g.job_kind) {
         case JOB_TOP:

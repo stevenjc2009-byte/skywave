@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "../store/diag.h"
 #include "../version.h"
 
 // radio-browser.info asks apps to identify themselves, and GitHub refuses
@@ -602,6 +603,16 @@ static int get_text_into(SwHttp *h, const char *url, char *buf, size_t cap,
     }
 
     swHttpClose(h);
+
+    // The one number that tells a "search found nothing" report apart from a
+    // "search never reached the server" one. v1.0.4's log recorded that the
+    // connection opened and then said nothing at all about what came back, so a
+    // console reporting an empty result set could not be distinguished from one
+    // whose body was truncated at `cap` or never arrived. Logged here rather
+    // than in directory.c because directory.c is compiled on the host by the
+    // `mirrors` suite, where swDiagf does not exist.
+    swDiagf("GET %s -> %d bytes (cap=%u)", url, out, (unsigned)cap);
+
     return out;
 }
 
